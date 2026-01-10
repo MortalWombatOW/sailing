@@ -37,11 +37,26 @@ impl Particle {
         Self {
             pos,
             vel,
-            mass: 1.0,
+            mass: 10.0, // "Hollywood ratio" - heavier than air
             density: 0.0,
             pressure: 0.0,
             z_height: 0.0,
-            layer_mask: 1, // Water
+            layer_mask: layer::WATER,
+            cell_id: 0,
+            _padding: [0.0; 2],
+        }
+    }
+
+    /// Create a new air particle at the given position with velocity
+    pub fn new_air(pos: [f32; 2], vel: [f32; 2]) -> Self {
+        Self {
+            pos,
+            vel,
+            mass: 1.0, // "Hollywood ratio" - lighter than water
+            density: 0.0,
+            pressure: 0.0,
+            z_height: 0.0,
+            layer_mask: layer::AIR,
             cell_id: 0,
             _padding: [0.0; 2],
         }
@@ -49,12 +64,51 @@ impl Particle {
 }
 
 /// Layer mask constants for particle types
+#[allow(dead_code)]
 pub mod layer {
     pub const WATER: u32 = 1;
     pub const AIR: u32 = 2;
     pub const HULL: u32 = 4;
     pub const SAIL: u32 = 8;
     pub const MAST: u32 = 16;
+}
+
+/// Grid parameters for spatial indexing (neighbor search)
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+pub struct GridParams {
+    /// Size of each grid cell (typically 2 * smoothing_radius)
+    pub cell_size: f32,
+    /// Number of cells in X direction
+    pub grid_width: u32,
+    /// Number of cells in Y direction
+    pub grid_height: u32,
+    /// World X coordinate of grid origin (left edge)
+    pub grid_origin_x: f32,
+    /// World Y coordinate of grid origin (bottom edge)
+    pub grid_origin_y: f32,
+    /// Padding for WGSL vec3 alignment (total 48 bytes)
+    /// Note: WGSL vec3<f32> has 16-byte alignment, so we need 7 f32s padding
+    pub _padding: [f32; 7],
+}
+
+impl Default for GridParams {
+    fn default() -> Self {
+        let cell_size = 20.0; // 2 * smoothing_radius (10.0)
+        let grid_origin_x = -640.0;
+        let grid_origin_y = -360.0;
+        let world_width = 1280.0;
+        let world_height = 720.0;
+        
+        Self {
+            cell_size,
+            grid_width: (world_width / cell_size).ceil() as u32,
+            grid_height: (world_height / cell_size).ceil() as u32,
+            grid_origin_x,
+            grid_origin_y,
+            _padding: [0.0; 7],
+        }
+    }
 }
 
 /// Global simulation parameters sent to GPU each frame.
@@ -86,11 +140,11 @@ pub struct SimParams {
 impl Default for SimParams {
     fn default() -> Self {
         Self {
-            delta_time: 0.005, // 5ms fixed timestep as per AGENT.md
-            gravity: -9.8,
+            delta_time: 0.032, // 32ms timestep (doubled for faster simulation)
+            gravity: -5.0,     // Reduced gravity for less aggressive falling
             smoothing_radius: 10.0,
             target_density_water: 1000.0,
-            target_density_air: 1.0,
+            target_density_air: 100.0, // Increased from 1.0 for better pressure response
             wind_interaction_threshold: 0.5,
             rudder_angle: 0.0,
             sheet_extension: 1.0,

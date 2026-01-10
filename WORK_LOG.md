@@ -38,3 +38,37 @@ Bevy's 2D transparent render pass has specific requirements:
 - `src/simulation/{mod.rs, setup.rs, systems.rs}`
 - `src/render/mod.rs`
 - `assets/shaders/{physics.wgsl, particles.wgsl}`
+
+## 2026-01-10: Phase 1 - Multi-Phase SPH Fluid Complete
+
+### Summary
+Implemented WCSPH physics with Air/Water particle separation. Water sinks (blue), Air rises (white).
+
+### Key Learnings for Future Phases
+
+#### 1. Brute Force vs Grid-Based Neighbor Search
+- Grid-based sorting (Bitonic Sort + CellStartEnd) is complex to debug
+- Started with O(n²) brute force for correctness, then optimize later
+- With 10k particles the GPU handles O(n²) fine on RTX 4070 Ti
+
+#### 2. SPH Pressure Force Sign
+- **Critical bug**: `pressure_force -= mass * term * gradient` = ATTRACTION!
+- Correct: `pressure_force += mass * term * gradient` for REPULSION
+- The spiky kernel gradient has a -45 coefficient that flips the direction
+
+#### 3. WGSL vec3 Alignment
+- WGSL `vec3<f32>` has 16-byte alignment, not 12!
+- A struct with 5 f32s + vec3 padding must be 48 bytes (not 32)
+- Rust padding: use `[f32; 7]` instead of `[f32; 3]` for a vec3<f32> field
+
+#### 4. SPH Parameter Tuning
+- Hollywood mass ratios: Water=10, Air=1 (not real 1000:1)
+- Stiffness B=100 for softer look, higher for incompressible
+- Viscosity 0.5 for stability, damping 0.99 to prevent explosions
+- Air buoyancy: explicit upward force (+3) instead of negative gravity
+
+### Files Created/Modified
+- `assets/shaders/{cell_id.wgsl, sort.wgsl, build_grid.wgsl, density.wgsl, forces.wgsl}`
+- `src/simulation/setup.rs` - Added GridParams, IndexBuffer, CellRangeBuffer, SortParamsBuffer
+- `src/resources.rs` - Added GridParams struct, Particle::new_air()
+

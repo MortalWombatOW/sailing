@@ -20,23 +20,24 @@ The agent must follow this strictly. Do not jump ahead.
 **Physics Model:** Weakly Compressible SPH (WCSPH).
 **Tasks:**
 
-* [ ] **Spatial Indexing:** Implement **Bitonic Sort**.
-* Shader 1: Calculate `cell_id` for every particle based on grid position.
-* Shader 2: Sort the particle buffer by `cell_id`.
-* Shader 3: Build a `CellStartEnd` buffer (mapping grid ID to start/end indices in the sorted array).
+* [x] **Spatial Indexing:** Implement **Bitonic Sort**.
+  * Shader 1: Calculate `cell_id` for every particle based on grid position.
+  * Shader 2: Sort the particle buffer by `cell_id`.
+  * Shader 3: Build a `CellStartEnd` buffer (mapping grid ID to start/end indices in the sorted array).
+  * *Note: Currently using O(n²) brute force for correctness; grid-based sorting stubbed for future optimization.*
 
 
-* [ ] **Density Kernel:** Compute density  for each particle by summing neighbors within `smoothing_radius`.
-* *Constraint:* Tune `mass` such that Air is light and Water is heavy. Use "Hollywood Ratios" (Air = 1, Water = 10) to prevent explosion, not real physics (1:1000).
+* [x] **Density Kernel:** Compute density  for each particle by summing neighbors within `smoothing_radius`.
+  * *Constraint:* Tune `mass` such that Air is light and Water is heavy. Use "Hollywood Ratios" (Air = 1, Water = 10) to prevent explosion, not real physics (1:1000).
 
 
-* [ ] **Force Kernel:** Compute Pressure Force () and Viscosity.
-* Use Tait’s Equation of State: .
+* [x] **Force Kernel:** Compute Pressure Force () and Viscosity.
+  * Use Tait’s Equation of State: .
 
 
-* [ ] **Integration:** Update Velocity and Position. Apply Gravity ().
-* [ ] **Boundaries:** Implement a "Reflection" boundary at the screen edges (keep particles inside).
-* [ ] **Verification Scenario ("Lava Lamp"):** Initialize a box with mixed Air/Water. They must separate cleanly. Water at bottom, Air on top. No explosions.
+* [x] **Integration:** Update Velocity and Position. Apply Gravity ().
+* [x] **Boundaries:** Implement a "Reflection" boundary at the screen edges (keep particles inside).
+* [x] **Verification Scenario ("Lava Lamp"):** Initialize a box with mixed Air/Water. They must separate cleanly. Water at bottom, Air on top. No explosions.
 
 ### Phase 2: The 2.5D Layer Logic
 

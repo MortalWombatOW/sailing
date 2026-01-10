@@ -1,5 +1,6 @@
-// Physics compute shader - simple integration: pos += vel * dt
-// Phase 0: Basic particle movement with boundary reflection
+// Physics Integration Shader
+// Updates velocity and position, applies boundaries
+// Phase 1: Enhanced with boundary damping
 
 struct Particle {
     pos: vec2<f32>,
@@ -23,11 +24,14 @@ struct SimParams {
     rudder_angle: f32,
     sheet_extension: f32,
     bounds: vec4<f32>, // min_x, max_x, min_y, max_y
-    _padding: vec4<f32>,  // Padding for 16-byte alignment (64 bytes total)
+    _padding: vec4<f32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> params: SimParams;
+
+const BOUNDARY_DAMPING: f32 = 0.5;
+const BOUNDARY_MARGIN: f32 = 5.0;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -40,30 +44,41 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     var p = particles[idx];
     
-    // Simple integration: pos += vel * dt
+    // Position integration (velocity already updated by forces shader)
     p.pos += p.vel * params.delta_time;
     
-    // Boundary reflection
-    let min_x = params.bounds.x;
-    let max_x = params.bounds.y;
-    let min_y = params.bounds.z;
-    let max_y = params.bounds.w;
+    // Boundary handling with damping
+    let min_x = params.bounds.x + BOUNDARY_MARGIN;
+    let max_x = params.bounds.y - BOUNDARY_MARGIN;
+    let min_y = params.bounds.z + BOUNDARY_MARGIN;
+    let max_y = params.bounds.w - BOUNDARY_MARGIN;
     
-    // Reflect off boundaries
+    // Left boundary
     if p.pos.x < min_x {
         p.pos.x = min_x;
-        p.vel.x = abs(p.vel.x);
-    } else if p.pos.x > max_x {
-        p.pos.x = max_x;
-        p.vel.x = -abs(p.vel.x);
+        p.vel.x = abs(p.vel.x) * BOUNDARY_DAMPING;
     }
-    
+    // Right boundary
+    if p.pos.x > max_x {
+        p.pos.x = max_x;
+        p.vel.x = -abs(p.vel.x) * BOUNDARY_DAMPING;
+    }
+    // Bottom boundary
     if p.pos.y < min_y {
         p.pos.y = min_y;
-        p.vel.y = abs(p.vel.y);
-    } else if p.pos.y > max_y {
+        p.vel.y = abs(p.vel.y) * BOUNDARY_DAMPING;
+    }
+    // Top boundary
+    if p.pos.y > max_y {
         p.pos.y = max_y;
-        p.vel.y = -abs(p.vel.y);
+        p.vel.y = -abs(p.vel.y) * BOUNDARY_DAMPING;
+    }
+    
+    // Clamp velocity to prevent explosions
+    let max_vel = 500.0;
+    let vel_len = length(p.vel);
+    if vel_len > max_vel {
+        p.vel = normalize(p.vel) * max_vel;
     }
     
     particles[idx] = p;

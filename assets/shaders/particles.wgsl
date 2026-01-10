@@ -73,14 +73,25 @@ fn vertex(
     // UV for circular shape
     out.uv = quad_vertex * 0.5 + 0.5;
     
-    // Color based on velocity (darker = slower, brighter = faster)
+    // Color based on particle type and velocity
     let speed = length(particle.vel);
     let normalized_speed = clamp(speed / 100.0, 0.0, 1.0);
     
-    // Water particles: blue color range
-    let base_color = vec3<f32>(0.2, 0.4, 0.8);
-    let fast_color = vec3<f32>(0.4, 0.8, 1.0);
-    let color = mix(base_color, fast_color, normalized_speed);
+    // Check if water (layer_mask & 1) or air (layer_mask & 2)
+    let is_water = (particle.layer_mask & 1u) != 0u;
+    
+    var color: vec3<f32>;
+    if is_water {
+        // Water particles: blue color range
+        let base_color = vec3<f32>(0.1, 0.3, 0.7);
+        let fast_color = vec3<f32>(0.3, 0.6, 1.0);
+        color = mix(base_color, fast_color, normalized_speed);
+    } else {
+        // Air particles: white/light gray color range
+        let base_color = vec3<f32>(0.8, 0.85, 0.9);
+        let fast_color = vec3<f32>(1.0, 1.0, 1.0);
+        color = mix(base_color, fast_color, normalized_speed);
+    }
     
     out.color = vec4<f32>(color, 1.0);
     
