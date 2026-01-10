@@ -1,0 +1,22 @@
+
+commands:
+  check: "cargo check"  
+  test: "cargo test"
+  build: "cargo build"
+  run: "cargo run"
+
+docs:
+  # Path to your architectural rules/constraints
+  rules: "AGENT.md"
+  
+  # Path to your task list (uses [ ]/[/]/[x] markers)
+  tasks: "WORK_PLAN.md"
+  
+  # Path to your work log (log_progress appends here)
+  log: "WORK_LOG.md"
+  
+  # Path to your codebase index/map
+  index: "INDEX.md"
+  
+  # Path to your project readme
+  readme: "README.md"
