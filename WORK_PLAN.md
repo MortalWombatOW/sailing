@@ -7,12 +7,12 @@ The agent must follow this strictly. Do not jump ahead.
 **Goal:** A Bevy app that launches a Compute Shader, updates a buffer, and renders dots.
 **Tasks:**
 
-* [ ] Initialize `cargo new` with `bevy`, `bytemuck`.
-* [ ] Set up the `MainCamera` (2D).
-* [ ] Create the `ParticleBuffer` (Storage Buffer) initialized with random positions.
-* [ ] Create a basic Compute Shader (`update.wgsl`) that moves particles: `pos += vel * dt`.
-* [ ] Create a Render Pipeline that draws instances of a quad/circle at `particle.pos`.
-* [ ] **Verification:** You see thousands of dots drifting across the screen.
+* [x] Initialize `cargo new` with `bevy`, `bytemuck`.
+* [x] Set up the `MainCamera` (2D).
+* [x] Create the `ParticleBuffer` (Storage Buffer) initialized with random positions.
+* [x] Create a basic Compute Shader (`update.wgsl`) that moves particles: `pos += vel * dt`.
+* [x] Create a Render Pipeline that draws instances of a quad/circle at `particle.pos`.
+* [x] **Verification:** You see thousands of dots drifting across the screen.
 
 ### Phase 1: The Stability Sandbox (Multi-Phase Fluid)
 

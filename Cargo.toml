@@ -1,0 +1,9 @@
+[package]
+name = "sailing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.15", features = ["wayland"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+rand = "0.8"
