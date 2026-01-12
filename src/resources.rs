@@ -37,7 +37,7 @@ impl Particle {
         Self {
             pos,
             vel,
-            mass: 10.0, // "Hollywood ratio" - heavier than air
+            mass: 50.0, // Water mass (Hollywood Ratio)" - heavier than air
             density: 0.0,
             pressure: 0.0,
             z_height: 0.0,
@@ -52,7 +52,7 @@ impl Particle {
         Self {
             pos,
             vel,
-            mass: 1.0, // "Hollywood ratio" - lighter than water
+            mass: 25.0, // Air mass (increased for stability)
             density: 0.0,
             pressure: 0.0,
             z_height: 0.0,
@@ -140,11 +140,11 @@ pub struct SimParams {
 impl Default for SimParams {
     fn default() -> Self {
         Self {
-            delta_time: 0.032, // 32ms timestep (doubled for faster simulation)
-            gravity: -5.0,     // Reduced gravity for less aggressive falling
+            delta_time: 0.064, // 64ms timestep (doubled for faster sim)
+            gravity: -9.8,     // Standard gravity
             smoothing_radius: 10.0,
-            target_density_water: 1000.0,
-            target_density_air: 100.0, // Increased from 1.0 for better pressure response
+            target_density_water: 1.0,  // Target 1.0 ensures positive pressure with mass=50
+            target_density_air: 0.5,    // Target 0.5 for air
             wind_interaction_threshold: 0.5,
             rudder_angle: 0.0,
             sheet_extension: 1.0,

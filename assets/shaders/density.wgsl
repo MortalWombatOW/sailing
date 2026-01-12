@@ -1,5 +1,5 @@
-// SPH Density Kernel (Brute Force)
-// Computes density for each particle - O(n²) for correctness, will optimize later
+// SPH Density Kernel (Grid-Based)
+// Computes density for each particle using grid-accelerated neighbor search
 
 struct Particle {
     pos: vec2<f32>,
@@ -11,6 +11,15 @@ struct Particle {
     layer_mask: u32,
     cell_id: u32,
     _padding: vec2<f32>,
+}
+
+struct GridParams {
+    cell_size: f32,
+    grid_width: u32,
+    grid_height: u32,
+    grid_origin_x: f32,
+    grid_origin_y: f32,
+    _padding: vec3<f32>,
 }
 
 struct SimParams {
@@ -27,18 +36,21 @@ struct SimParams {
 }
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
-@group(0) @binding(1) var<uniform> params: SimParams;
+@group(0) @binding(1) var<storage, read> indices: array<u32>;
+@group(0) @binding(2) var<storage, read> cell_offsets: array<u32>;  // From counting sort: offset[i] = start of cell i
+@group(0) @binding(3) var<uniform> grid: GridParams;
+@group(0) @binding(4) var<uniform> params: SimParams;
 
-// Poly6 kernel for density estimation
-// W(r, h) = 315 / (64 * π * h^9) * (h² - r²)³
+// Poly6 kernel for density estimation (2D version)
 fn poly6_kernel(r_sq: f32, h: f32) -> f32 {
     let h_sq = h * h;
     if r_sq >= h_sq {
         return 0.0;
     }
     let diff = h_sq - r_sq;
-    let h9 = h_sq * h_sq * h_sq * h_sq * h;
-    let coeff = 315.0 / (64.0 * 3.14159265359 * h9);
+    // 2D poly6: 4 / (π * h^8) * (h² - r²)³
+    let h8 = h_sq * h_sq * h_sq * h_sq;
+    let coeff = 4.0 / (3.14159265359 * h8);
     return coeff * diff * diff * diff;
 }
 
@@ -54,20 +66,51 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var p = particles[idx];
     let h = params.smoothing_radius;
     
+    // Use stored cell_id to derive cell coordinates (avoids floating point precision mismatches)
+    // cell_id = cell_y * grid_width + cell_x, so we reverse it
+    let cell_x = i32(p.cell_id % grid.grid_width);
+    let cell_y = i32(p.cell_id / grid.grid_width);
+    
     var density = 0.0;
     
-    // Brute force: check all particles
-    for (var j = 0u; j < particle_count; j++) {
-        let neighbor = particles[j];
-        let diff = p.pos - neighbor.pos;
-        let r_sq = dot(diff, diff);
-        
-        // Accumulate density contribution
-        density += neighbor.mass * poly6_kernel(r_sq, h);
+    // Iterate over 3x3 neighborhood of cells
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let nx = cell_x + dx;
+            let ny = cell_y + dy;
+            
+            // Skip out-of-bounds cells
+            if nx < 0 || ny < 0 || u32(nx) >= grid.grid_width || u32(ny) >= grid.grid_height {
+                continue;
+            }
+            
+            let neighbor_cell_id = u32(ny) * grid.grid_width + u32(nx);
+            
+            // Counting sort layout: cell_offsets[i] = start, cell_offsets[i+1] = end
+            let cell_start = cell_offsets[neighbor_cell_id];
+            let cell_end = cell_offsets[neighbor_cell_id + 1u];
+            
+            // Skip empty cells
+            if cell_start >= cell_end {
+                continue;
+            }
+            
+            // Iterate over particles in this cell
+            for (var j = cell_start; j < cell_end; j++) {
+                let neighbor_idx = indices[j];
+                let neighbor = particles[neighbor_idx];
+                
+                let diff = p.pos - neighbor.pos;
+                let r_sq = dot(diff, diff);
+                
+                // Accumulate density contribution
+                density += neighbor.mass * poly6_kernel(r_sq, h);
+            }
+        }
     }
     
-    // Ensure minimum density to prevent division by zero
-    p.density = max(density, 0.001);
+    // Ensure minimum density to prevent division by zero / force explosion
+    p.density = max(density, 0.1);
     
     particles[idx] = p;
 }

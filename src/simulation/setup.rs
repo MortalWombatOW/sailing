@@ -113,21 +113,45 @@ impl FromWorld for IndexBuffer {
     }
 }
 
-/// Resource holding cell range buffer for grid lookup
+/// Resource holding cell counts buffer for counting sort (Pass 1)
 #[derive(Resource)]
-pub struct CellRangeBuffer(pub Buffer);
+pub struct CellCountsBuffer(pub Buffer);
 
-impl FromWorld for CellRangeBuffer {
+impl FromWorld for CellCountsBuffer {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
 
         let grid_params = GridParams::default();
         let total_cells = (grid_params.grid_width * grid_params.grid_height) as usize;
         
-        // Each cell stores start and end as u32 (8 bytes per cell)
+        // One u32 count per cell
         let buffer = render_device.create_buffer(&BufferDescriptor {
-            label: Some("CellRange Buffer"),
-            size: (total_cells * 8) as u64,
+            label: Some("CellCounts Buffer"),
+            size: (total_cells * 4) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self(buffer)
+    }
+}
+
+/// Resource holding cell offsets buffer for counting sort (Pass 2/3)
+/// Size is total_cells + 1 for the end sentinel
+#[derive(Resource)]
+pub struct CellOffsetsBuffer(pub Buffer);
+
+impl FromWorld for CellOffsetsBuffer {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
+        let grid_params = GridParams::default();
+        let total_cells = (grid_params.grid_width * grid_params.grid_height) as usize;
+        
+        // One u32 offset per cell + 1 for end sentinel
+        let buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("CellOffsets Buffer"),
+            size: ((total_cells + 1) * 4) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

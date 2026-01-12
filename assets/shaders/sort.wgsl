@@ -1,6 +1,6 @@
-// Bitonic Sort Shader
+// Bitonic Sort Shader with Push Constants
 // Sorts particle indices by cell_id for efficient neighbor searching
-// Uses index buffer indirection to avoid moving full particle data
+// Uses push constants for per-pass parameters
 
 struct Particle {
     pos: vec2<f32>,
@@ -15,47 +15,47 @@ struct Particle {
 }
 
 struct SortParams {
-    block_size: u32,    // Current block size in bitonic sort
-    sub_block_size: u32, // Current sub-block (comparison distance)
+    block_size: u32,
+    sub_block_size: u32,
     particle_count: u32,
     _padding: u32,
 }
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read_write> indices: array<u32>;
-@group(0) @binding(2) var<uniform> sort_params: SortParams;
+
+var<push_constant> params: SortParams;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+    // Each thread handles one comparison pair
+    let k = global_id.x;
+    let particle_count = params.particle_count;
     
-    if idx >= sort_params.particle_count {
+    // We only need N/2 comparisons
+    // Note: Use ceil(N/2) if N is odd? Bitonic usually requires N=2^k. 
+    // We'll trust the checked bounds logic below.
+    if k >= (particle_count + 1u) / 2u {
         return;
     }
     
-    let block_size = sort_params.block_size;
-    let sub_block_size = sort_params.sub_block_size;
+    let block_size = params.block_size;
+    let sub_block_size = params.sub_block_size;
     
-    // Determine the pair to compare
-    let block_start = (idx / sub_block_size) * sub_block_size;
-    let half_sub = sub_block_size / 2u;
-    let within_sub = idx % sub_block_size;
-    
-    // Only process left element of each pair
-    if within_sub >= half_sub {
-        return;
-    }
-    
-    let left_idx = block_start + within_sub;
+    // Proper mapping from comparison index k to element indices
+    // This inserts a gap of 'half_sub' every 'half_sub' items
+    let half_sub = sub_block_size >> 1u;
+    let left_idx = (k / half_sub) * sub_block_size + (k % half_sub);
     let right_idx = left_idx + half_sub;
     
-    if right_idx >= sort_params.particle_count {
+    if right_idx >= particle_count {
         return;
     }
     
     // Determine sort direction based on block position
-    let block_idx = idx / block_size;
-    let ascending = (block_idx % 2u) == 0u;
+    // Bitonic sort requires alternating ascending/descending per block
+    let block_idx = left_idx / block_size;
+    let ascending = (block_idx & 1u) == 0u;
     
     // Get indices and their cell_ids
     let idx_a = indices[left_idx];

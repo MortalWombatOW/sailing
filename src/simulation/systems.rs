@@ -1,12 +1,14 @@
 //! Compute shader systems for SPH physics simulation.
 //! 
-//! Pipeline stages:
+//! Pipeline stages (Counting Sort):
 //! 1. Cell ID calculation
-//! 2. Bitonic Sort (multiple passes)
-//! 3. Build Grid (clear + build)
-//! 4. Density calculation
-//! 5. Force calculation
-//! 6. Position integration
+//! 2. Clear cell counts
+//! 3. Count cells
+//! 4. Prefix sum
+//! 5. Scatter sort
+//! 6. Density calculation
+//! 7. Force calculation
+//! 8. Position integration
 
 use bevy::{
     prelude::*,
@@ -18,9 +20,10 @@ use bevy::{
 };
 
 use super::setup::{
-    CellRangeBuffer, GridParamsBuffer, IndexBuffer, ParticleBuffer, SimParamsBuffer,
-    SortParamsBuffer, PARTICLE_COUNT,
+    CellCountsBuffer, CellOffsetsBuffer, GridParamsBuffer, IndexBuffer, 
+    ParticleBuffer, SimParamsBuffer, PARTICLE_COUNT,
 };
+use crate::resources::GridParams;
 
 // ==================== Pipeline Resources ====================
 
@@ -28,16 +31,18 @@ use super::setup::{
 #[derive(Resource)]
 pub struct SphPipelines {
     pub cell_id: CachedComputePipelineId,
-    pub sort: CachedComputePipelineId,
-    pub clear_grid: CachedComputePipelineId,
-    pub build_grid: CachedComputePipelineId,
+    pub clear_counts: CachedComputePipelineId,
+    pub count_cells: CachedComputePipelineId,
+    pub prefix_sum: CachedComputePipelineId,
+    pub scatter: CachedComputePipelineId,
     pub density: CachedComputePipelineId,
     pub forces: CachedComputePipelineId,
     pub physics: CachedComputePipelineId,
     // Bind group layouts
     pub cell_id_layout: BindGroupLayout,
-    pub sort_layout: BindGroupLayout,
-    pub grid_layout: BindGroupLayout,
+    pub count_layout: BindGroupLayout,
+    pub prefix_layout: BindGroupLayout,
+    pub scatter_layout: BindGroupLayout,
     pub density_layout: BindGroupLayout,
     pub physics_layout: BindGroupLayout,
 }
@@ -57,37 +62,49 @@ impl FromWorld for SphPipelines {
             ],
         );
 
-        // Sort layout: particles (read), indices (rw), sort params (uniform)
-        let sort_layout = render_device.create_bind_group_layout(
-            Some("Sort Layout"),
+        // Count layout: particles (read), cell_counts (rw), grid params
+        let count_layout = render_device.create_bind_group_layout(
+            Some("Count Layout"),
             &[
                 storage_buffer_entry(0, true),  // particles read
-                storage_buffer_entry(1, false), // indices rw
-                uniform_buffer_entry(2),        // sort params
+                storage_buffer_entry(1, false), // cell_counts rw (atomic)
+                uniform_buffer_entry(2),        // grid params
             ],
         );
 
-        // Grid layout: particles (read), indices (read), cell_ranges (rw), grid params
-        let grid_layout = render_device.create_bind_group_layout(
-            Some("Grid Layout"),
+        // Prefix sum layout: cell_counts (read), cell_offsets (rw), grid params
+        let prefix_layout = render_device.create_bind_group_layout(
+            Some("Prefix Sum Layout"),
             &[
-                storage_buffer_entry(0, true),  // particles read
-                storage_buffer_entry(1, true),  // indices read
-                storage_buffer_entry(2, false), // cell_ranges rw
-                uniform_buffer_entry(3),        // grid params
+                storage_buffer_entry(0, true),  // cell_counts read
+                storage_buffer_entry(1, false), // cell_offsets rw
+                uniform_buffer_entry(2),        // grid params
             ],
         );
 
-        // Density/Forces layout (simplified for brute force): particles (rw), sim params
+        // Scatter layout: particles (read), cell_offsets (rw atomic), sorted_indices (rw)
+        let scatter_layout = render_device.create_bind_group_layout(
+            Some("Scatter Layout"),
+            &[
+                storage_buffer_entry(0, true),  // particles read
+                storage_buffer_entry(1, false), // cell_offsets rw (atomic)
+                storage_buffer_entry(2, false), // sorted_indices rw
+            ],
+        );
+
+        // Density/Forces layout: particles, indices, cell_offsets, grid, sim params
         let density_layout = render_device.create_bind_group_layout(
             Some("Density/Forces Layout"),
             &[
                 storage_buffer_entry(0, false), // particles rw
-                uniform_buffer_entry(1),        // sim params
+                storage_buffer_entry(1, true),  // indices read
+                storage_buffer_entry(2, true),  // cell_offsets read
+                uniform_buffer_entry(3),        // grid params
+                uniform_buffer_entry(4),        // sim params
             ],
         );
 
-        // Physics layout: particles (rw), sim params (same as density now)
+        // Physics layout: particles (rw), sim params
         let physics_layout = render_device.create_bind_group_layout(
             Some("Physics Layout"),
             &[
@@ -98,8 +115,9 @@ impl FromWorld for SphPipelines {
 
         // Load shaders
         let cell_id_shader = asset_server.load("shaders/cell_id.wgsl");
-        let sort_shader = asset_server.load("shaders/sort.wgsl");
-        let build_grid_shader = asset_server.load("shaders/build_grid.wgsl");
+        let count_cells_shader = asset_server.load("shaders/count_cells.wgsl");
+        let prefix_sum_shader = asset_server.load("shaders/prefix_sum.wgsl");
+        let scatter_shader = asset_server.load("shaders/scatter_sort.wgsl");
         let density_shader = asset_server.load("shaders/density.wgsl");
         let forces_shader = asset_server.load("shaders/forces.wgsl");
         let physics_shader = asset_server.load("shaders/physics.wgsl");
@@ -115,32 +133,42 @@ impl FromWorld for SphPipelines {
             zero_initialize_workgroup_memory: true,
         });
 
-        let sort = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("Sort Pipeline".into()),
-            layout: vec![sort_layout.clone()],
-            shader: sort_shader,
+        let clear_counts = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("Clear Counts Pipeline".into()),
+            layout: vec![count_layout.clone()],
+            shader: count_cells_shader.clone(),
             shader_defs: vec![],
-            entry_point: "main".into(),
+            entry_point: "clear_counts".into(),
             push_constant_ranges: vec![],
             zero_initialize_workgroup_memory: true,
         });
 
-        let clear_grid = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("Clear Grid Pipeline".into()),
-            layout: vec![grid_layout.clone()],
-            shader: build_grid_shader.clone(),
+        let count_cells = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("Count Cells Pipeline".into()),
+            layout: vec![count_layout.clone()],
+            shader: count_cells_shader,
             shader_defs: vec![],
-            entry_point: "clear_cells".into(),
+            entry_point: "count_cells".into(),
             push_constant_ranges: vec![],
             zero_initialize_workgroup_memory: true,
         });
 
-        let build_grid = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("Build Grid Pipeline".into()),
-            layout: vec![grid_layout.clone()],
-            shader: build_grid_shader,
+        let prefix_sum = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("Prefix Sum Pipeline".into()),
+            layout: vec![prefix_layout.clone()],
+            shader: prefix_sum_shader,
             shader_defs: vec![],
-            entry_point: "build_grid".into(),
+            entry_point: "prefix_sum".into(),
+            push_constant_ranges: vec![],
+            zero_initialize_workgroup_memory: true,
+        });
+
+        let scatter = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("Scatter Pipeline".into()),
+            layout: vec![scatter_layout.clone()],
+            shader: scatter_shader,
+            shader_defs: vec![],
+            entry_point: "scatter".into(),
             push_constant_ranges: vec![],
             zero_initialize_workgroup_memory: true,
         });
@@ -177,15 +205,17 @@ impl FromWorld for SphPipelines {
 
         Self {
             cell_id,
-            sort,
-            clear_grid,
-            build_grid,
+            clear_counts,
+            count_cells,
+            prefix_sum,
+            scatter,
             density,
             forces,
             physics,
             cell_id_layout,
-            sort_layout,
-            grid_layout,
+            count_layout,
+            prefix_layout,
+            scatter_layout,
             density_layout,
             physics_layout,
         }
@@ -224,45 +254,33 @@ fn uniform_buffer_entry(binding: u32) -> BindGroupLayoutEntry {
 #[derive(Resource)]
 pub struct SphBindGroups {
     pub cell_id: BindGroup,
-    pub sort: BindGroup,
-    pub grid: BindGroup,
+    pub count: BindGroup,
+    pub prefix: BindGroup,
+    pub scatter: BindGroup,
     pub density: BindGroup,
     pub physics: BindGroup,
 }
 
 /// Prepare all bind groups
-pub fn prepare_bind_groups(
+fn prepare_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     pipelines: Option<Res<SphPipelines>>,
     particles: Option<Res<ParticleBuffer>>,
     indices: Option<Res<IndexBuffer>>,
-    cell_ranges: Option<Res<CellRangeBuffer>>,
+    cell_counts: Option<Res<CellCountsBuffer>>,
+    cell_offsets: Option<Res<CellOffsetsBuffer>>,
     grid_params: Option<Res<GridParamsBuffer>>,
     sim_params: Option<Res<SimParamsBuffer>>,
-    sort_params: Option<Res<SortParamsBuffer>>,
 ) {
-    let (
-        Some(pipelines),
-        Some(particles),
-        Some(indices),
-        Some(cell_ranges),
-        Some(grid_params),
-        Some(sim_params),
-        Some(sort_params),
-    ) = (
-        pipelines,
-        particles,
-        indices,
-        cell_ranges,
-        grid_params,
-        sim_params,
-        sort_params,
-    )
+    let (Some(pipelines), Some(particles), Some(indices), Some(cell_counts), 
+         Some(cell_offsets), Some(grid_params), Some(sim_params)) = 
+        (pipelines, particles, indices, cell_counts, cell_offsets, grid_params, sim_params) 
     else {
         return;
     };
 
+    // Cell ID bind group
     let cell_id = render_device.create_bind_group(
         Some("CellID BindGroup"),
         &pipelines.cell_id_layout,
@@ -278,9 +296,10 @@ pub fn prepare_bind_groups(
         ],
     );
 
-    let sort = render_device.create_bind_group(
-        Some("Sort BindGroup"),
-        &pipelines.sort_layout,
+    // Count bind group
+    let count = render_device.create_bind_group(
+        Some("Count BindGroup"),
+        &pipelines.count_layout,
         &[
             BindGroupEntry {
                 binding: 0,
@@ -288,38 +307,56 @@ pub fn prepare_bind_groups(
             },
             BindGroupEntry {
                 binding: 1,
-                resource: indices.0.as_entire_binding(),
+                resource: cell_counts.0.as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
-                resource: sort_params.0.as_entire_binding(),
-            },
-        ],
-    );
-
-    let grid = render_device.create_bind_group(
-        Some("Grid BindGroup"),
-        &pipelines.grid_layout,
-        &[
-            BindGroupEntry {
-                binding: 0,
-                resource: particles.0.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: indices.0.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: 2,
-                resource: cell_ranges.0.as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: 3,
                 resource: grid_params.0.as_entire_binding(),
             },
         ],
     );
 
+    // Prefix sum bind group
+    let prefix = render_device.create_bind_group(
+        Some("Prefix Sum BindGroup"),
+        &pipelines.prefix_layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: cell_counts.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: cell_offsets.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: grid_params.0.as_entire_binding(),
+            },
+        ],
+    );
+
+    // Scatter bind group
+    let scatter = render_device.create_bind_group(
+        Some("Scatter BindGroup"),
+        &pipelines.scatter_layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particles.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: cell_offsets.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: indices.0.as_entire_binding(),
+            },
+        ],
+    );
+
+    // Density/Forces bind group
     let density = render_device.create_bind_group(
         Some("Density BindGroup"),
         &pipelines.density_layout,
@@ -330,11 +367,24 @@ pub fn prepare_bind_groups(
             },
             BindGroupEntry {
                 binding: 1,
+                resource: indices.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: cell_offsets.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: grid_params.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
                 resource: sim_params.0.as_entire_binding(),
             },
         ],
     );
 
+    // Physics bind group
     let physics = render_device.create_bind_group(
         Some("Physics BindGroup"),
         &pipelines.physics_layout,
@@ -352,15 +402,16 @@ pub fn prepare_bind_groups(
 
     commands.insert_resource(SphBindGroups {
         cell_id,
-        sort,
-        grid,
+        count,
+        prefix,
+        scatter,
         density,
         physics,
     });
 }
 
 pub fn queue_compute() {
-    // Handled by render graph node
+    // Nothing needed here currently
 }
 
 // ==================== Render Graph Node ====================
@@ -381,13 +432,24 @@ impl render_graph::Node for SphPhysicsNode {
         let Some(pipelines) = world.get_resource::<SphPipelines>() else {
             return Ok(());
         };
-        
         let Some(bind_groups) = world.get_resource::<SphBindGroups>() else {
             return Ok(());
         };
 
         // Get all pipelines (if any aren't ready, skip this frame)
         let Some(cell_id_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.cell_id) else {
+            return Ok(());
+        };
+        let Some(clear_counts_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.clear_counts) else {
+            return Ok(());
+        };
+        let Some(count_cells_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.count_cells) else {
+            return Ok(());
+        };
+        let Some(prefix_sum_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.prefix_sum) else {
+            return Ok(());
+        };
+        let Some(scatter_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.scatter) else {
             return Ok(());
         };
         let Some(density_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.density) else {
@@ -400,7 +462,10 @@ impl render_graph::Node for SphPhysicsNode {
             return Ok(());
         };
 
-        let workgroup_count = (PARTICLE_COUNT as u32 + 63) / 64;
+        let particle_workgroup_count = (PARTICLE_COUNT as u32 + 63) / 64;
+        let grid_params = GridParams::default();
+        let total_cells = grid_params.grid_width * grid_params.grid_height;
+        let cell_workgroup_count = (total_cells + 255) / 256;
 
         // Stage 1: Calculate cell IDs
         {
@@ -412,13 +477,76 @@ impl render_graph::Node for SphPhysicsNode {
             );
             pass.set_pipeline(cell_id_pipeline);
             pass.set_bind_group(0, &bind_groups.cell_id, &[]);
-            pass.dispatch_workgroups(workgroup_count, 1, 1);
+            pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
         }
 
-        // Stage 2-3: Skip sorting for now (simplified version)
-        // TODO: Implement full bitonic sort - for now use brute force neighbor search
-        
-        // Stage 4: Density calculation
+        // Stage 2: Clear cell counts
+        {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
+                    label: Some("Clear Counts Pass"),
+                    timestamp_writes: None,
+                },
+            );
+            pass.set_pipeline(clear_counts_pipeline);
+            pass.set_bind_group(0, &bind_groups.count, &[]);
+            pass.dispatch_workgroups(cell_workgroup_count, 1, 1);
+        }
+
+        // Stage 3: Count particles per cell
+        {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
+                    label: Some("Count Cells Pass"),
+                    timestamp_writes: None,
+                },
+            );
+            pass.set_pipeline(count_cells_pipeline);
+            pass.set_bind_group(0, &bind_groups.count, &[]);
+            pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
+        }
+
+        // Stage 4: Prefix sum (single thread for simplicity)
+        {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
+                    label: Some("Prefix Sum Pass"),
+                    timestamp_writes: None,
+                },
+            );
+            pass.set_pipeline(prefix_sum_pipeline);
+            pass.set_bind_group(0, &bind_groups.prefix, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        // Stage 5: Scatter particles to sorted positions
+        // NOTE: This modifies cell_offsets via atomicAdd, so we need to restore them after
+        {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
+                    label: Some("Scatter Pass"),
+                    timestamp_writes: None,
+                },
+            );
+            pass.set_pipeline(scatter_pipeline);
+            pass.set_bind_group(0, &bind_groups.scatter, &[]);
+            pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
+        }
+
+        // Stage 5b: Re-run prefix sum to restore cell_offsets for neighbor lookup
+        {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
+                    label: Some("Prefix Sum Restore Pass"),
+                    timestamp_writes: None,
+                },
+            );
+            pass.set_pipeline(prefix_sum_pipeline);
+            pass.set_bind_group(0, &bind_groups.prefix, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        // Stage 6: Density calculation
         {
             let mut pass = render_context.command_encoder().begin_compute_pass(
                 &ComputePassDescriptor {
@@ -428,10 +556,10 @@ impl render_graph::Node for SphPhysicsNode {
             );
             pass.set_pipeline(density_pipeline);
             pass.set_bind_group(0, &bind_groups.density, &[]);
-            pass.dispatch_workgroups(workgroup_count, 1, 1);
+            pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
         }
 
-        // Stage 5: Force calculation
+        // Stage 7: Force calculation
         {
             let mut pass = render_context.command_encoder().begin_compute_pass(
                 &ComputePassDescriptor {
@@ -440,11 +568,11 @@ impl render_graph::Node for SphPhysicsNode {
                 },
             );
             pass.set_pipeline(forces_pipeline);
-            pass.set_bind_group(0, &bind_groups.density, &[]); // Same layout
-            pass.dispatch_workgroups(workgroup_count, 1, 1);
+            pass.set_bind_group(0, &bind_groups.density, &[]);
+            pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
         }
 
-        // Stage 6: Position integration
+        // Stage 8: Position integration
         {
             let mut pass = render_context.command_encoder().begin_compute_pass(
                 &ComputePassDescriptor {
@@ -454,26 +582,24 @@ impl render_graph::Node for SphPhysicsNode {
             );
             pass.set_pipeline(physics_pipeline);
             pass.set_bind_group(0, &bind_groups.physics, &[]);
-            pass.dispatch_workgroups(workgroup_count, 1, 1);
+            pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
         }
 
         Ok(())
     }
 }
 
-// Keep old names for compatibility with mod.rs
-pub type PhysicsPipeline = SphPipelines;
-pub type PhysicsNode = SphPhysicsNode;
+// Public system wrapper
 pub fn prepare_bind_group(
     commands: Commands,
     render_device: Res<RenderDevice>,
     pipelines: Option<Res<SphPipelines>>,
     particles: Option<Res<ParticleBuffer>>,
     indices: Option<Res<IndexBuffer>>,
-    cell_ranges: Option<Res<CellRangeBuffer>>,
+    cell_counts: Option<Res<CellCountsBuffer>>,
+    cell_offsets: Option<Res<CellOffsetsBuffer>>,
     grid_params: Option<Res<GridParamsBuffer>>,
     sim_params: Option<Res<SimParamsBuffer>>,
-    sort_params: Option<Res<SortParamsBuffer>>,
 ) {
     prepare_bind_groups(
         commands,
@@ -481,9 +607,13 @@ pub fn prepare_bind_group(
         pipelines,
         particles,
         indices,
-        cell_ranges,
+        cell_counts,
+        cell_offsets,
         grid_params,
         sim_params,
-        sort_params,
     );
 }
+
+// Keep old names for compatibility with mod.rs
+pub type PhysicsPipeline = SphPipelines;
+pub type PhysicsNode = SphPhysicsNode;

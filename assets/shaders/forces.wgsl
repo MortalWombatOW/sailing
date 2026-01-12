@@ -1,5 +1,28 @@
-// SPH Forces Kernel (Brute Force)
-// Computes pressure force and viscosity - O(n²) for correctness
+// SPH Forces Kernel (Grid-Based)
+// Computes pressure force and viscosity using grid-accelerated neighbor search
+
+// ==================== TUNABLE PARAMETERS ====================
+// Pressure (Tait EOS)
+const PRESSURE_STIFFNESS: f32 = 3.0;      // B - higher = stronger repulsion
+const PRESSURE_GAMMA: f32 = 7.0;          // Exponent - higher = stiffer at high density  
+const PRESSURE_CAP: f32 = 2000.0;         // Maximum pressure to prevent explosions
+
+// Kernel distances
+const MIN_DISTANCE: f32 = 0.01;           // Minimum distance to prevent singularity
+
+// Viscosity
+const VISCOSITY_MU: f32 = 0.1;            // Fluid thickness - higher = thicker/slower
+
+// Buoyancy
+const AIR_BUOYANCY: f32 = 1.0;            // Base upward force on air particles
+const ARCHIMEDES_STRENGTH: f32 = 2.0;     // Extra buoyancy when air is submerged in water
+
+// Damping
+const VELOCITY_DAMPING: f32 = 0.95;        // Velocity retained per frame (0-1)
+
+// XSPH Smoothing (reduces oscillation)
+const XSPH_EPSILON: f32 = 1.0;             // Velocity smoothing strength (0-1, higher = more smoothing)
+// =============================================================
 
 struct Particle {
     pos: vec2<f32>,
@@ -11,6 +34,15 @@ struct Particle {
     layer_mask: u32,
     cell_id: u32,
     _padding: vec2<f32>,
+}
+
+struct GridParams {
+    cell_size: f32,
+    grid_width: u32,
+    grid_height: u32,
+    grid_origin_x: f32,
+    grid_origin_y: f32,
+    _padding: vec3<f32>,
 }
 
 struct SimParams {
@@ -27,34 +59,50 @@ struct SimParams {
 }
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
-@group(0) @binding(1) var<uniform> params: SimParams;
+@group(0) @binding(1) var<storage, read> indices: array<u32>;
+@group(0) @binding(2) var<storage, read> cell_offsets: array<u32>;  // From counting sort: offset[i] = start of cell i
+@group(0) @binding(3) var<uniform> grid: GridParams;
+@group(0) @binding(4) var<uniform> params: SimParams;
 
 // Tait's Equation of State for pressure
 fn compute_pressure(density: f32, target_density: f32) -> f32 {
-    let B = 100.0;  // Stiffness constant
-    let gamma = 7.0;
     let ratio = density / target_density;
-    return B * (pow(ratio, gamma) - 1.0);
+    return PRESSURE_STIFFNESS * (pow(ratio, PRESSURE_GAMMA) - 1.0);
 }
 
-// Spiky kernel gradient for pressure force
+// Poly6 kernel for XSPH smoothing (2D version)
+fn poly6_kernel(r_sq: f32, h: f32) -> f32 {
+    let h_sq = h * h;
+    if r_sq >= h_sq {
+        return 0.0;
+    }
+    let diff = h_sq - r_sq;
+    // 2D poly6: 4 / (π * h^8) * (h² - r²)³
+    let h8 = h_sq * h_sq * h_sq * h_sq;
+    let coeff = 4.0 / (3.14159265359 * h8);
+    return coeff * diff * diff * diff;
+}
+
+// Spiky kernel gradient for pressure force (2D version)
 fn spiky_gradient(r: vec2<f32>, r_len: f32, h: f32) -> vec2<f32> {
-    if r_len >= h || r_len < 0.0001 {
+    if r_len >= h || r_len < MIN_DISTANCE {
         return vec2<f32>(0.0, 0.0);
     }
-    let h6 = h * h * h * h * h * h;
-    let coeff = -45.0 / (3.14159265359 * h6);
+    // 2D spiky gradient: -30 / (π * h^5) * (h - r)² * r̂
+    let h5 = h * h * h * h * h;
+    let coeff = -30.0 / (3.14159265359 * h5);
     let diff = h - r_len;
     return coeff * diff * diff * normalize(r);
 }
 
-// Viscosity kernel laplacian
+// Viscosity kernel laplacian (2D version)
 fn viscosity_laplacian(r_len: f32, h: f32) -> f32 {
     if r_len >= h {
         return 0.0;
     }
-    let h6 = h * h * h * h * h * h;
-    let coeff = 45.0 / (3.14159265359 * h6);
+    // 2D viscosity laplacian: 40 / (π * h^5) * (h - r)
+    let h5 = h * h * h * h * h;
+    let coeff = 40.0 / (3.14159265359 * h5);
     return coeff * (h - r_len);
 }
 
@@ -74,51 +122,96 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let is_water = (p.layer_mask & 1u) != 0u;
     let target_density = select(params.target_density_air, params.target_density_water, is_water);
     
-    // Compute pressure from Tait EOS
-    p.pressure = compute_pressure(p.density, target_density);
+    // Compute pressure from Tait EOS with caps
+    p.pressure = clamp(compute_pressure(p.density, target_density), 0.0, PRESSURE_CAP);
+    
+    // Use stored cell_id to derive cell coordinates (avoids floating point precision mismatches)
+    let cell_x = i32(p.cell_id % grid.grid_width);
+    let cell_y = i32(p.cell_id / grid.grid_width);
     
     var pressure_force = vec2<f32>(0.0, 0.0);
     var viscosity_force = vec2<f32>(0.0, 0.0);
-    let viscosity_mu = 0.5; // Viscosity coefficient (increased for stability)
+    var xsph_correction = vec2<f32>(0.0, 0.0);  // XSPH velocity smoothing
+    var water_density_around: f32 = 0.0;        // For Archimedes buoyancy on air
     
-    // Brute force: check all particles
-    for (var j = 0u; j < particle_count; j++) {
-        if j == idx {
-            continue;
+    // Iterate over 3x3 neighborhood of cells
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let nx = cell_x + dx;
+            let ny = cell_y + dy;
+            
+            if nx < 0 || ny < 0 || u32(nx) >= grid.grid_width || u32(ny) >= grid.grid_height {
+                continue;
+            }
+            
+            let neighbor_cell_id = u32(ny) * grid.grid_width + u32(nx);
+            
+            // Counting sort layout: cell_offsets[i] = start, cell_offsets[i+1] = end
+            let cell_start = cell_offsets[neighbor_cell_id];
+            let cell_end = cell_offsets[neighbor_cell_id + 1u];
+            
+            if cell_start >= cell_end {
+                continue;
+            }
+            
+            for (var j = cell_start; j < cell_end; j++) {
+                let neighbor_idx = indices[j];
+                
+                // Skip self
+                if neighbor_idx == idx {
+                    continue;
+                }
+                
+                let neighbor = particles[neighbor_idx];
+                let r = p.pos - neighbor.pos;
+                let r_len = length(r);
+                
+                if r_len >= h || r_len < MIN_DISTANCE {
+                    continue;
+                }
+                
+                // Pressure force (symmetric formulation) - repulsion
+                let pressure_term = (p.pressure + neighbor.pressure) / (2.0 * neighbor.density);
+                pressure_force -= neighbor.mass * pressure_term * spiky_gradient(r, r_len, h);
+                
+                // Viscosity force
+                let vel_diff = neighbor.vel - p.vel;
+                viscosity_force += VISCOSITY_MU * neighbor.mass * (vel_diff / neighbor.density) * viscosity_laplacian(r_len, h);
+                
+                // XSPH velocity smoothing - averages velocity with neighbors
+                let avg_density = (p.density + neighbor.density) * 0.5;
+                let w = poly6_kernel(r_len * r_len, h);
+                xsph_correction += (neighbor.mass / avg_density) * vel_diff * w;
+                
+                // Archimedes buoyancy: accumulate water density around air particles
+                if !is_water {
+                    let neighbor_is_water = (neighbor.layer_mask & 1u) != 0u;
+                    if neighbor_is_water {
+                        water_density_around += neighbor.mass * w;
+                    }
+                }
+            }
         }
-        
-        let neighbor = particles[j];
-        let r = p.pos - neighbor.pos;
-        let r_len = length(r);
-        
-        if r_len >= h || r_len < 0.0001 {
-            continue;
-        }
-        
-        // Pressure force (symmetric formulation) - positive = repulsion
-        let pressure_term = (p.pressure + neighbor.pressure) / (2.0 * neighbor.density);
-        pressure_force += neighbor.mass * pressure_term * spiky_gradient(r, r_len, h);
-        
-        // Viscosity force
-        let vel_diff = neighbor.vel - p.vel;
-        viscosity_force += viscosity_mu * neighbor.mass * (vel_diff / neighbor.density) * viscosity_laplacian(r_len, h);
     }
     
     // Apply forces to velocity
     let total_force = pressure_force + viscosity_force;
     p.vel += (total_force / p.density) * params.delta_time;
     
+    // Apply XSPH smoothing to reduce oscillation
+    p.vel += XSPH_EPSILON * xsph_correction;
+    
     // Apply gravity with buoyancy
     if is_water {
-        // Water sinks
         p.vel.y += params.gravity * params.delta_time;
     } else {
-        // Air rises (buoyancy effect)
-        p.vel.y += 3.0 * params.delta_time;
+        // Archimedes buoyancy: stronger when surrounded by water
+        let archimedes_force = ARCHIMEDES_STRENGTH * water_density_around * abs(params.gravity);
+        p.vel.y += (AIR_BUOYANCY + archimedes_force) * params.delta_time;
     }
     
     // Apply damping to prevent energy buildup
-    p.vel *= 0.99;
+    p.vel *= VELOCITY_DAMPING;
     
     particles[idx] = p;
 }
