@@ -72,3 +72,36 @@ Implemented WCSPH physics with Air/Water particle separation. Water sinks (blue)
 - `src/simulation/setup.rs` - Added GridParams, IndexBuffer, CellRangeBuffer, SortParamsBuffer
 - `src/resources.rs` - Added GridParams struct, Particle::new_air()
 
+
+## 2026-01-11: SPH Tuning - Vortices & Stability
+
+### Summary
+Addressed stability issues in the SPH simulation, specifically persistent vortices, particle alignment at boundaries, and tensile instability (clumping).
+
+### Key Learnings
+
+#### 1. Hard Boundaries vs Soft Repulsion
+- **Problem**: Hard clamping (`max(pos.x, min_x)`) causes particles to line up in perfect vertical columns at the walls ("crystalline stacking").
+- **Fix**: Replaced hard clamping with a **soft repulsion force** that ramps up as particles approach the boundary (`BOUNDARY_RANGE`). This breaks the alignment and creates natural interaction.
+
+#### 2. Stable Vortices (Convection Cells)
+- **Problem**: Simulation settled into stable, rotating vortices (like convection cells) instead of calming down.
+- **Root Cause**: Likely a combination of **XSPH velocity smoothing** (which averages neighbor velocities, enforcing coherent rotation) and **high timestep** (adding energy).
+- **Fix**: 
+    - Disabled **XSPH** (`0.0`) to break velocity coherence.
+    - Increased **Viscosity** (`0.5`) to dampen rotation.
+    - Reduced **Timestep** (`0.04`) to prevent energy overshoot.
+
+#### 3. Artificial Pressure (Tensile Instability)
+- **Problem**: Particles clumping together in pairs or clusters (tensile instability).
+- **Attempt**: Added `CLOSE_REPULSION` (Monaghan artificial pressure) to push close particles apart.
+- **Finding**: While it prevents clumping, if set too high (`1000.0`), it acts like a spring adding massive energy to the system, causing explosions/oscillations. Disabled it (`0.0`) in favor of correct pressure formulation.
+
+#### 4. Kernel Choice: Wendland vs Poly6
+- **Problem**: Poly6 kernel (gradient) is 0 at r=0, allowing particles to stack on top of each other.
+- **Fix**: Switched to **Wendland C2** kernel for both density and pressure forces.
+- **Correction**: The 2D Wendland gradient formula was initially incorrect (missing `q` factor). Fixed: `∇W = -140q/(πh³) * (1-q)³ * r̂`.
+
+#### 5. Pressure Force Formulation
+- **Correction**: The pressure force was using an asymmetric formula `(Pi + Pj)/(2*ρj)`.
+- **Fix**: Switched to standard symmetric SPH: `Pi/ρi² + Pj/ρj²`. This ensures forces are equal and opposite (Newton's 3rd), conserving momentum.
