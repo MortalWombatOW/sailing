@@ -105,3 +105,53 @@ Addressed stability issues in the SPH simulation, specifically persistent vortic
 #### 5. Pressure Force Formulation
 - **Correction**: The pressure force was using an asymmetric formula `(Pi + Pj)/(2*ρj)`.
 - **Fix**: Switched to standard symmetric SPH: `Pi/ρi² + Pj/ρj²`. This ensures forces are equal and opposite (Newton's 3rd), conserving momentum.
+
+## 2026-01-12: Phase 3 - Peridynamics Hull & Soft-Sphere Repulsion
+
+### Summary
+Implemented Peridynamic bonds to create a rigid hull structure, and added smooth soft-sphere repulsion to prevent water penetration.
+
+### Key Learnings for Future Phases
+
+#### 1. Atomic Force Accumulation for Bonds
+- **Problem**: Multiple bonds act on the same particle, causing race conditions in GPU compute.
+- **Solution**: Use atomic integer accumulation with fixed-point scaling: `atomicAdd(&forces[idx], i32(force * SCALER))`.
+- **Critical**: The physics shader must ACTUALLY READ and APPLY these accumulated forces - don't just bind the buffer!
+
+#### 2. Bond Force Application Was Missing
+- **Bug**: `bonds.wgsl` wrote forces to atomic buffer, but `physics.wgsl` never read them.
+- **Fix**: Added code in `physics.wgsl` to: load forces, convert from fixed-point, apply F/m*dt, then clear buffer.
+
+#### 3. Layer Masks for Hull Particles
+- **Problem**: Hull particles were receiving AIR_BUOYANCY force (7.0 upward every frame).
+- **Cause**: Logic only checked "is_water" and applied buoyancy to everything else.
+- **Fix**: Explicitly check `is_hull = (layer_mask & 4) != 0` and exclude from gravity/buoyancy.
+
+#### 4. Lennard-Jones Potential Explodes (Don't Use!)
+- **Problem**: LJ formula `F = D * [(r0/r)^4 - (r0/r)^2]` causes particles to shoot off.
+- **Cause**: When `r → 0`, the `1/r^n` terms explode to infinity.
+- **Lesson**: Even with tiny strength (0.1), if particles start inside hull, they get astronomical forces.
+
+#### 5. Soft-Sphere Repulsion (Use This!)
+- **Solution**: Use bounded linear or quadratic repulsion instead of LJ.
+- **Linear**: `F = k * (r0 - r)` when `r < r0` - bounded but has discontinuous derivative.
+- **Quadratic (smooth)**: `F = k * (1 - r/r0)²` - both force AND derivative are 0 at threshold.
+- **Benefit**: Maximum force is always `k` (bounded), gracefully handles overlapping particles.
+
+#### 6. Don't Spawn Particles Inside Rigid Bodies
+- **Problem**: Even with soft-sphere, initial overlaps cause high forces.
+- **Fix**: Calculate hull bounding box (with margin) and skip spawning water inside it.
+
+#### 7. Bond Damping Prevents Oscillation
+- **Problem**: Stiff springs without damping oscillate forever.
+- **Solution**: Add velocity-based damping: `F_damp = c * dot(v_rel, spring_dir)`.
+- **Caution**: Very high stiffness (>1M) can still cause instability or integer overflow.
+
+### Files Changed
+- `assets/shaders/bonds.wgsl` - NEW: Peridynamic bond force computation
+- `assets/shaders/bond_lines.wgsl` - NEW: Bond visualization shader
+- `assets/shaders/physics.wgsl` - Bond force application, layer-aware gravity
+- `assets/shaders/forces.wgsl` - Soft-sphere repulsion, XSPH smoothing enabled
+- `src/simulation/setup.rs` - Hull particle spawning, bond generation, hull exclusion zone
+- `src/render/mod.rs` - Bond line rendering pipeline
+

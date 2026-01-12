@@ -1,5 +1,6 @@
 // Physics Integration Shader
-// Updates velocity and position, applies soft boundary repulsion
+// Updates velocity and position, applies soft boundary repulsion AND Bond Forces
+// Phase 3: Added Bond Force application from atomic buffer
 // Phase 1: Enhanced with soft boundaries to prevent particle alignment
 
 struct Particle {
@@ -29,9 +30,13 @@ struct SimParams {
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> params: SimParams;
+@group(0) @binding(2) var<storage, read_write> forces: array<atomic<i32>>; // Atomic accumulators [x, y, x, y...]
+
+const FORCE_SCALER: f32 = 1000.0;
+
 
 // ==================== BOUNDARY PARAMETERS ====================
-const BOUNDARY_STIFFNESS: f32 = 500.0;    // Repulsion strength - higher = harder bounce
+const BOUNDARY_STIFFNESS: f32 = 0.0;//500.0;    // Repulsion strength - higher = harder bounce
 const BOUNDARY_RANGE: f32 = 4.0;         // Distance at which repulsion starts
 const BOUNDARY_MARGIN: f32 = 2.0;         // Hard stop margin (safety fallback)
 const MAX_VELOCITY: f32 = 500.0;          // Velocity cap to prevent explosions
@@ -61,7 +66,52 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var p = particles[idx];
+
+    // ==================== STATIC PARTICLE CHECK ====================
+    // If mass is huge (Infinite mass), treat as static obstacle
+    if p.mass > 10000.0 {
+        p.vel = vec2<f32>(0.0, 0.0);
+        // Do not update position
+        particles[idx] = p;
+        return;
+    }
+    // ===============================================================
+
+    // ==================== APPLY BOND FORCES ====================
+    // Read accumulated bond forces from atomic buffer and apply to velocity
+    // Forces are stored as fixed-point integers scaled by FORCE_SCALER
+    let fx_int = atomicLoad(&forces[idx * 2u]);
+    let fy_int = atomicLoad(&forces[idx * 2u + 1u]);
     
+    // Convert back to float
+    let bond_force = vec2<f32>(f32(fx_int), f32(fy_int)) / FORCE_SCALER;
+    
+    // Apply force to velocity: a = F/m, v += a*dt
+    p.vel += (bond_force / p.mass) * params.delta_time;
+    
+    // Clear the force buffer for next frame (reset to 0)
+    atomicStore(&forces[idx * 2u], 0);
+    atomicStore(&forces[idx * 2u + 1u], 0);
+    // ===========================================================
+
+    // ==================== WIND TUNNEL RECYCLING ====================
+    let is_air = (p.layer_mask & 2u) != 0u;
+    if is_air {
+        // If Air particle leaves the Right Edge
+        if p.pos.x > params.bounds.y {
+             // Teleport to Left Edge
+            p.pos.x = params.bounds.x + 5.0; // Small offset to avoid immediate boundary force
+             // Reset Velocity to "Wind Speed" (Simulate continuous flow)
+            p.vel = vec2<f32>(150.0, 0.0); 
+             
+             // Keep Y position relative (Laminar flow)
+             // Reset Density/Pressure for stability? (Will be recalculated next frame anyway)
+            p.density = params.target_density_air;
+            p.pressure = 0.0;
+        }
+    }
+    // ===============================================================
+
     // Calculate distances to each boundary
     let dist_left = p.pos.x - params.bounds.x;
     let dist_right = params.bounds.y - p.pos.x;
@@ -92,14 +142,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let min_y = params.bounds.z + BOUNDARY_MARGIN;
     let max_y = params.bounds.w - BOUNDARY_MARGIN;
 
-    if p.pos.x < min_x {
-        p.pos.x = min_x;
-        p.vel.x = abs(p.vel.x) * 0.3;
-    }
-    if p.pos.x > max_x {
-        p.pos.x = max_x;
-        p.vel.x = -abs(p.vel.x) * 0.3;
-    }
+    // if p.pos.x < min_x {
+    //     p.pos.x = min_x;
+    //     p.vel.x = abs(p.vel.x) * 0.3;
+    // }
+    // if p.pos.x > max_x {
+    //     p.pos.x = max_x;
+    //     p.vel.x = -abs(p.vel.x) * 0.3;
+    // }
     if p.pos.y < min_y {
         p.pos.y = min_y;
         p.vel.y = abs(p.vel.y) * 0.3;

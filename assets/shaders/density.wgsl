@@ -45,7 +45,7 @@ fn wendland_c2_kernel(r_sq: f32, h: f32) -> f32 {
     // Wendland C2 has support radius 2h, so q ∈ [0, 2]
     let r = sqrt(r_sq);
     let q = r / h;
-    
+
     if q >= 2.0 {
         return 0.0;
     }
@@ -54,10 +54,10 @@ fn wendland_c2_kernel(r_sq: f32, h: f32) -> f32 {
     let one_minus_q_half = 1.0 - q * 0.5;
     let term2 = one_minus_q_half * one_minus_q_half;
     let term4 = term2 * term2;
-    
+
     let h_sq = h * h;
     let coeff = 7.0 / (4.0 * 3.14159265359 * h_sq);
-    
+
     return coeff * term4 * (2.0 * q + 1.0);
 }
 
@@ -65,11 +65,11 @@ fn wendland_c2_kernel(r_sq: f32, h: f32) -> f32 {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
     let particle_count = arrayLength(&particles);
-    
+
     if idx >= particle_count {
         return;
     }
-    
+
     var p = particles[idx];
     let h = params.smoothing_radius;
     
@@ -77,7 +77,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // cell_id = cell_y * grid_width + cell_x, so we reverse it
     let cell_x = i32(p.cell_id % grid.grid_width);
     let cell_y = i32(p.cell_id / grid.grid_width);
-    
+
     var density = 0.0;
     
     // Iterate over 3x3 neighborhood of cells
@@ -90,7 +90,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             if nx < 0 || ny < 0 || u32(nx) >= grid.grid_width || u32(ny) >= grid.grid_height {
                 continue;
             }
-            
+
             let neighbor_cell_id = u32(ny) * grid.grid_width + u32(nx);
             
             // Counting sort layout: cell_offsets[i] = start, cell_offsets[i+1] = end
@@ -106,10 +106,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             for (var j = cell_start; j < cell_end; j++) {
                 let neighbor_idx = indices[j];
                 let neighbor = particles[neighbor_idx];
-                
+
                 let diff = p.pos - neighbor.pos;
                 let r_sq = dot(diff, diff);
                 
+                // Layer Logic:
+                // 1. Same layer always interacts
+                // 2. Anything interacts with Hull (Layer 4)
+                // 3. Water (1) and Air (2) do NOT interact directly in Density phase (they ignore each other)
+                let layer_mask_hull = 4u;
+                let is_hull = (p.layer_mask & layer_mask_hull) != 0u;
+                let neighbor_is_hull = (neighbor.layer_mask & layer_mask_hull) != 0u;
+                let same_layer = (p.layer_mask == neighbor.layer_mask);
+
+                if !same_layer && !is_hull && !neighbor_is_hull {
+                    continue;
+                }
+
                 // Accumulate density contribution
                 density += neighbor.mass * wendland_c2_kernel(r_sq, h);
             }
@@ -118,6 +131,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // Ensure minimum density to prevent division by zero / force explosion
     p.density = max(density, 0.1);
-    
+
     particles[idx] = p;
 }

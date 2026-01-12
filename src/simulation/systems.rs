@@ -20,8 +20,8 @@ use bevy::{
 };
 
 use super::setup::{
-    CellCountsBuffer, CellOffsetsBuffer, GridParamsBuffer, IndexBuffer, 
-    ParticleBuffer, SimParamsBuffer, PARTICLE_COUNT,
+    BondBuffer, CellCountsBuffer, CellOffsetsBuffer, ForceBuffer, GridParamsBuffer, IndexBuffer,
+    ParticleBuffer, SimParamsBuffer, BOND_COUNT, PARTICLE_COUNT,
 };
 use crate::resources::GridParams;
 
@@ -37,6 +37,7 @@ pub struct SphPipelines {
     pub scatter: CachedComputePipelineId,
     pub density: CachedComputePipelineId,
     pub forces: CachedComputePipelineId,
+    pub bonds: CachedComputePipelineId,
     pub physics: CachedComputePipelineId,
     // Bind group layouts
     pub cell_id_layout: BindGroupLayout,
@@ -44,6 +45,7 @@ pub struct SphPipelines {
     pub prefix_layout: BindGroupLayout,
     pub scatter_layout: BindGroupLayout,
     pub density_layout: BindGroupLayout,
+    pub bonds_layout: BindGroupLayout,
     pub physics_layout: BindGroupLayout,
 }
 
@@ -104,12 +106,23 @@ impl FromWorld for SphPipelines {
             ],
         );
 
-        // Physics layout: particles (rw), sim params
+        // Bonds layout: particles (rw), bonds (rw), forces (atomic rw)
+        let bonds_layout = render_device.create_bind_group_layout(
+            Some("Bonds Layout"),
+            &[
+                storage_buffer_entry(0, false), // particles rw
+                storage_buffer_entry(1, false), // bonds rw
+                storage_buffer_entry(2, false), // forces atomic rw
+            ],
+        );
+
+        // Physics layout: particles (rw), sim params, forces (atomic rw)
         let physics_layout = render_device.create_bind_group_layout(
             Some("Physics Layout"),
             &[
                 storage_buffer_entry(0, false), // particles rw
                 uniform_buffer_entry(1),        // sim params
+                storage_buffer_entry(2, false), // forces atomic rw
             ],
         );
 
@@ -120,6 +133,7 @@ impl FromWorld for SphPipelines {
         let scatter_shader = asset_server.load("shaders/scatter_sort.wgsl");
         let density_shader = asset_server.load("shaders/density.wgsl");
         let forces_shader = asset_server.load("shaders/forces.wgsl");
+        let bonds_shader = asset_server.load("shaders/bonds.wgsl");
         let physics_shader = asset_server.load("shaders/physics.wgsl");
 
         // Create pipelines
@@ -193,6 +207,16 @@ impl FromWorld for SphPipelines {
             zero_initialize_workgroup_memory: true,
         });
 
+        let bonds = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("Bonds Pipeline".into()),
+            layout: vec![bonds_layout.clone()],
+            shader: bonds_shader,
+            shader_defs: vec![],
+            entry_point: "main".into(),
+            push_constant_ranges: vec![],
+            zero_initialize_workgroup_memory: true,
+        });
+
         let physics = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("Physics Pipeline".into()),
             layout: vec![physics_layout.clone()],
@@ -211,12 +235,14 @@ impl FromWorld for SphPipelines {
             scatter,
             density,
             forces,
+            bonds,
             physics,
             cell_id_layout,
             count_layout,
             prefix_layout,
             scatter_layout,
             density_layout,
+            bonds_layout,
             physics_layout,
         }
     }
@@ -258,6 +284,7 @@ pub struct SphBindGroups {
     pub prefix: BindGroup,
     pub scatter: BindGroup,
     pub density: BindGroup,
+    pub bonds: BindGroup,
     pub physics: BindGroup,
 }
 
@@ -272,10 +299,12 @@ fn prepare_bind_groups(
     cell_offsets: Option<Res<CellOffsetsBuffer>>,
     grid_params: Option<Res<GridParamsBuffer>>,
     sim_params: Option<Res<SimParamsBuffer>>,
+    bond_buffer: Option<Res<BondBuffer>>,
+    force_buffer: Option<Res<ForceBuffer>>,
 ) {
     let (Some(pipelines), Some(particles), Some(indices), Some(cell_counts), 
-         Some(cell_offsets), Some(grid_params), Some(sim_params)) = 
-        (pipelines, particles, indices, cell_counts, cell_offsets, grid_params, sim_params) 
+         Some(cell_offsets), Some(grid_params), Some(sim_params), Some(bond_buffer), Some(force_buffer)) = 
+        (pipelines, particles, indices, cell_counts, cell_offsets, grid_params, sim_params, bond_buffer, force_buffer) 
     else {
         return;
     };
@@ -384,6 +413,26 @@ fn prepare_bind_groups(
         ],
     );
 
+    // Bonds bind group
+    let bonds = render_device.create_bind_group(
+        Some("Bonds BindGroup"),
+        &pipelines.bonds_layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particles.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: bond_buffer.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: force_buffer.0.as_entire_binding(),
+            },
+        ],
+    );
+
     // Physics bind group
     let physics = render_device.create_bind_group(
         Some("Physics BindGroup"),
@@ -397,6 +446,10 @@ fn prepare_bind_groups(
                 binding: 1,
                 resource: sim_params.0.as_entire_binding(),
             },
+            BindGroupEntry {
+                binding: 2,
+                resource: force_buffer.0.as_entire_binding(),
+            },
         ],
     );
 
@@ -406,6 +459,7 @@ fn prepare_bind_groups(
         prefix,
         scatter,
         density,
+        bonds,
         physics,
     });
 }
@@ -435,6 +489,10 @@ impl render_graph::Node for SphPhysicsNode {
         let Some(bind_groups) = world.get_resource::<SphBindGroups>() else {
             return Ok(());
         };
+        // Also need Force Buffer to clear it
+        let Some(force_buffer) = world.get_resource::<ForceBuffer>() else {
+            return Ok(());
+        };
 
         // Get all pipelines (if any aren't ready, skip this frame)
         let Some(cell_id_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.cell_id) else {
@@ -458,11 +516,15 @@ impl render_graph::Node for SphPhysicsNode {
         let Some(forces_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.forces) else {
             return Ok(());
         };
+        let Some(bonds_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.bonds) else {
+            return Ok(());
+        };
         let Some(physics_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.physics) else {
             return Ok(());
         };
 
         let particle_workgroup_count = (PARTICLE_COUNT as u32 + 63) / 64;
+        let bond_workgroup_count = (BOND_COUNT as u32 + 255) / 256;
         let grid_params = GridParams::default();
         let total_cells = grid_params.grid_width * grid_params.grid_height;
         let cell_workgroup_count = (total_cells + 255) / 256;
@@ -572,6 +634,22 @@ impl render_graph::Node for SphPhysicsNode {
             pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
         }
 
+        // Stage 7.5: Bond Force calculation
+        // IMPORTANT: Clear Force Buffer first!
+        render_context.command_encoder().clear_buffer(&force_buffer.0, 0, None);
+        
+        {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
+                    label: Some("Bonds Pass"),
+                    timestamp_writes: None,
+                },
+            );
+            pass.set_pipeline(bonds_pipeline);
+            pass.set_bind_group(0, &bind_groups.bonds, &[]);
+            pass.dispatch_workgroups(bond_workgroup_count, 1, 1);
+        }
+
         // Stage 8: Position integration
         {
             let mut pass = render_context.command_encoder().begin_compute_pass(
@@ -600,6 +678,8 @@ pub fn prepare_bind_group(
     cell_offsets: Option<Res<CellOffsetsBuffer>>,
     grid_params: Option<Res<GridParamsBuffer>>,
     sim_params: Option<Res<SimParamsBuffer>>,
+    bond_buffer: Option<Res<BondBuffer>>,
+    force_buffer: Option<Res<ForceBuffer>>,
 ) {
     prepare_bind_groups(
         commands,
@@ -611,6 +691,8 @@ pub fn prepare_bind_group(
         cell_offsets,
         grid_params,
         sim_params,
+        bond_buffer,
+        force_buffer,
     );
 }
 

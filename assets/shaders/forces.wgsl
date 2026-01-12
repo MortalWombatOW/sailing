@@ -3,17 +3,17 @@
 
 // ==================== TUNABLE PARAMETERS ====================
 // Pressure (Tait EOS)
-const PRESSURE_STIFFNESS: f32 = 5.0;      // B - higher = stronger repulsion
+const PRESSURE_STIFFNESS: f32 = 100.0;    // B - higher = stronger repulsion (was 5.0)
 const PRESSURE_GAMMA: f32 = 7.0;          // Exponent - higher = stiffer at high density  
 const PRESSURE_CAP: f32 = 2000.0;         // Maximum pressure to prevent explosions
 
 // Kernel distances
 const MIN_DISTANCE: f32 = 0.003;           // Minimum distance to prevent singularity
-const CLOSE_REPULSION: f32 = 0.0;        // Disabled - was adding energy causing vortices
+const CLOSE_REPULSION: f32 = 50.0;         // Enabled - push close particles apart
 const CLOSE_RANGE: f32 = 0.3;             // Fraction of h where close repulsion kicks in (0-1)
 
 // Viscosity
-const VISCOSITY_MU: f32 = 0.5;            // Fluid thickness - higher = thicker/slower
+const VISCOSITY_MU: f32 = 2.0;            // Fluid thickness - higher = thicker/slower (was 0.5)
 
 // Buoyancy
 const AIR_BUOYANCY: f32 = 7.0;            // Base upward force on air particles
@@ -23,7 +23,13 @@ const ARCHIMEDES_STRENGTH: f32 = 0.0;     // Extra buoyancy when air is submerge
 const VELOCITY_DAMPING: f32 = 0.999;        // Velocity retained per frame (0-1)
 
 // XSPH Smoothing (reduces oscillation)
-const XSPH_EPSILON: f32 = 0.0;             // Velocity smoothing strength (0-1, higher = more smoothing)
+const XSPH_EPSILON: f32 = 0.5;             // Velocity smoothing strength (0-1, higher = more smoothing)
+
+// Soft-Sphere Hull-Water Repulsion (prevents water penetration)
+// Uses bounded linear spring: F = k * (r0 - r) when r < r0
+const LJ_STRENGTH: f32 = 100000.0;             // k - spring constant (force per unit overlap)
+const LJ_EQUILIBRIUM: f32 = 10.0;          // r0 - repulsion radius (particles pushed apart if closer)
+// Maximum possible force = LJ_STRENGTH * LJ_EQUILIBRIUM = 500 (bounded!)
 // =============================================================
 
 struct Particle {
@@ -181,6 +187,61 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     continue;
                 }
                 
+                // =============================================================
+                // 2.5D LAYER LOGIC
+                // =============================================================
+                let layer_water = 1u;
+                let layer_air = 2u;
+                let layer_hull = 4u;
+
+                let is_air = (p.layer_mask & layer_air) != 0u;
+                let is_water = (p.layer_mask & layer_water) != 0u;
+                let neighbor_is_water = (neighbor.layer_mask & layer_water) != 0u;
+                let neighbor_is_air = (neighbor.layer_mask & layer_air) != 0u;
+                let neighbor_is_hull = (neighbor.layer_mask & layer_hull) != 0u;
+                let is_hull = (p.layer_mask & layer_hull) != 0u;
+                let same_layer = (p.layer_mask == neighbor.layer_mask);
+
+                // Special Case: Air -> Water Interaction (Wind hitting Waves)
+                if is_air && neighbor_is_water {
+                    // Only interact if Water density is high (Wave Crest / Surface)
+                    if neighbor.density > params.wind_interaction_threshold {
+                        // Repulsion Force (Bounce)
+                        // Force direction: away from water particle
+                        let bounce_dir = normalize(r);
+                        let penetration = neighbor.density - params.wind_interaction_threshold;
+                        let bounce_strength = 200.0; // Tunable
+                        
+                        // Add explicit bounce force (modifying pressure_force accumulator)
+                        pressure_force += bounce_strength * penetration * bounce_dir * (1.0 - r_len / h);
+                    }
+                    // Do NOT apply standard SPH forces
+                    continue;
+                }
+
+                // Special Case: Water -> Air (Ignore for now, Air doesn't push Water much)
+                if is_water && neighbor_is_air {
+                    continue;
+                }
+
+                // Standard SPH Checks (Same as Density Kernel)
+                if !same_layer && !is_hull && !neighbor_is_hull {
+                    continue;
+                }
+                
+                // ==================== SOFT-SPHERE HULL-WATER REPULSION ====================
+                // Prevents water from penetrating hull using SMOOTH quadratic repulsion
+                // Formula: F = k * (1 - r/r0)^2 when r < r0, else 0
+                // This is smooth: at r=r0, both force AND its derivative are 0 (no sudden jump)
+                if (is_water && neighbor_is_hull) || (is_hull && neighbor_is_water) {
+                    if r_len < LJ_EQUILIBRIUM {
+                        let t = 1.0 - (r_len / LJ_EQUILIBRIUM);  // 0 at r0, 1 at r=0
+                        let smooth_force = LJ_STRENGTH * t * t;   // Quadratic ramp
+                        pressure_force += smooth_force * normalize(r);
+                    }
+                }
+                // =============================================================================
+
                 // Pressure force (symmetric formulation) - repulsion
                 let pressure_term = (p.pressure + neighbor.pressure) / (2.0 * neighbor.density);
                 pressure_force -= neighbor.mass * pressure_term * wendland_c2_gradient(r, r_len, h);
@@ -200,14 +261,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let avg_density = (p.density + neighbor.density) * 0.5;
                 let w = poly6_kernel(r_len * r_len, h);
                 xsph_correction += (neighbor.mass / avg_density) * vel_diff * w;
-                
-                // Archimedes buoyancy: accumulate water density around air particles
-                if !is_water {
-                    let neighbor_is_water = (neighbor.layer_mask & 1u) != 0u;
-                    if neighbor_is_water {
-                        water_density_around += neighbor.mass * w;
-                    }
-                }
             }
         }
     }
@@ -219,14 +272,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Apply XSPH smoothing to reduce oscillation
     p.vel += XSPH_EPSILON * xsph_correction;
     
-    // Apply gravity with buoyancy
+    // Apply gravity with buoyancy (only to water and air, NOT hull)
+    let is_air = (p.layer_mask & 2u) != 0u;
+    let is_hull = (p.layer_mask & 4u) != 0u;
+
     if is_water {
         p.vel.y += params.gravity * params.delta_time;
-    } else {
+    } else if is_air && !is_hull {
         // Archimedes buoyancy: stronger when surrounded by water
         let archimedes_force = ARCHIMEDES_STRENGTH * water_density_around * abs(params.gravity);
         p.vel.y += (AIR_BUOYANCY + archimedes_force) * params.delta_time;
     }
+    // Hull particles get no gravity or buoyancy - they only move via bond forces and SPH pressure
     
     // Apply damping to prevent energy buildup
     p.vel *= VELOCITY_DAMPING;

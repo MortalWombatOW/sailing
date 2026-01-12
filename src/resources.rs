@@ -141,7 +141,7 @@ impl Default for SimParams {
     fn default() -> Self {
         Self {
             delta_time: 0.04, // 40ms timestep (stable)
-            gravity: -9.8,     // Standard gravity (faster particles)
+            gravity: 0.0,     // Standard gravity (faster particles)
             smoothing_radius: 10.0,
             target_density_water: 1.0,  // Target 1.0 ensures positive pressure with mass=50
             target_density_air: 0.5,    // Target 0.5 for air
@@ -152,4 +152,27 @@ impl Default for SimParams {
             _padding: [0.0; 4],
         }
     }
+}
+
+/// A bond connecting two particles (Peridynamics)
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+pub struct Bond {
+    /// Index of particle A in global buffer
+    pub particle_a: u32,
+    /// Index of particle B in global buffer
+    pub particle_b: u32,
+    /// Rest length (distance at which force is zero)
+    pub rest_length: f32,
+    /// Stiffness (Spring constant k)
+    pub stiffness: f32,
+    /// Breaking strain (if (current_len - rest)/rest > this, bond breaks)
+    pub breaking_strain: f32,
+    /// Bond type: 0=Hull, 1=Sail, 2=Sheet
+    pub bond_type: u32,
+    /// Active flag: 1=Active, 0=Broken
+    pub is_active: u32,
+    /// Padding for 16-byte alignment? Struct size: 4+4+4+4+4+4+4 = 28 bytes.
+    /// Next multiple of 16 is 32. Need 4 bytes padding.
+    pub _padding: u32,
 }

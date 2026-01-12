@@ -41,11 +41,11 @@ struct VertexOutput {
 // Quad vertices (2 triangles)
 const QUAD_VERTICES: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0),
-    vec2<f32>( 1.0, -1.0),
-    vec2<f32>( 1.0,  1.0),
+    vec2<f32>(1.0, -1.0),
+    vec2<f32>(1.0, 1.0),
     vec2<f32>(-1.0, -1.0),
-    vec2<f32>( 1.0,  1.0),
-    vec2<f32>(-1.0,  1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, 1.0),
 );
 
 const PARTICLE_SIZE: f32 = 3.0;
@@ -56,7 +56,7 @@ fn vertex(
     @builtin(instance_index) instance_index: u32,
 ) -> VertexOutput {
     var out: VertexOutput;
-    
+
     let particle = particles[instance_index];
     let quad_vertex = QUAD_VERTICES[vertex_index];
     
@@ -77,11 +77,18 @@ fn vertex(
     let speed = length(particle.vel);
     let normalized_speed = clamp(speed / 100.0, 0.0, 1.0);
     
-    // Check if water (layer_mask & 1) or air (layer_mask & 2)
+    // Check particle type by layer_mask
     let is_water = (particle.layer_mask & 1u) != 0u;
-    
+    let is_air = (particle.layer_mask & 2u) != 0u;
+    let is_hull = (particle.layer_mask & 4u) != 0u;
+
     var color: vec3<f32>;
-    if is_water {
+    if is_hull {
+        // Hull particles: brown/wood color
+        let base_color = vec3<f32>(0.55, 0.35, 0.2);
+        let stressed_color = vec3<f32>(0.7, 0.4, 0.2); // Lighter when moving fast
+        color = mix(base_color, stressed_color, normalized_speed);
+    } else if is_water {
         // Water particles: blue color range
         let base_color = vec3<f32>(0.1, 0.3, 0.7);
         let fast_color = vec3<f32>(0.3, 0.6, 1.0);
@@ -92,9 +99,9 @@ fn vertex(
         let fast_color = vec3<f32>(1.0, 1.0, 1.0);
         color = mix(base_color, fast_color, normalized_speed);
     }
-    
+
     out.color = vec4<f32>(color, 1.0);
-    
+
     return out;
 }
 
@@ -106,10 +113,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     
     // Smooth edge
     let alpha = 1.0 - smoothstep(0.4, 0.5, dist);
-    
+
     if alpha < 0.01 {
         discard;
     }
-    
+
     return vec4<f32>(in.color.rgb, alpha);
 }

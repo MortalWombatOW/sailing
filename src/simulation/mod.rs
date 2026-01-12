@@ -12,8 +12,8 @@ use bevy::{
 };
 
 pub use setup::{
-    CellCountsBuffer, CellOffsetsBuffer, GridParamsBuffer, IndexBuffer, 
-    ParticleBuffer, SimParamsBuffer, PARTICLE_COUNT,
+    BondBuffer, CellCountsBuffer, CellOffsetsBuffer, ForceBuffer, GridParamsBuffer, IndexBuffer,
+    ParticleBuffer, SimParamsBuffer, BOND_COUNT, PARTICLE_COUNT,
 };
 
 /// Plugin that manages the GPU compute pipeline for SPH particle simulation.
@@ -41,6 +41,8 @@ impl Plugin for SimulationPlugin {
         render_app.init_resource::<IndexBuffer>();
         render_app.init_resource::<CellCountsBuffer>();
         render_app.init_resource::<CellOffsetsBuffer>();
+        render_app.init_resource::<BondBuffer>();
+        render_app.init_resource::<ForceBuffer>();
         // Initialize compute pipelines
         render_app.init_resource::<systems::SphPipelines>();
     }
