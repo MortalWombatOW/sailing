@@ -1,5 +1,6 @@
 //! Simulation module - GPU compute pipeline for SPH particle physics.
 
+mod scenarios;
 mod setup;
 mod systems;
 

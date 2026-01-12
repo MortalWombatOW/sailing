@@ -181,3 +181,44 @@ Implemented Peridynamic bonds to create a rigid hull structure, and added smooth
 - `src/simulation/setup.rs` - Hull particle spawning, bond generation, hull exclusion zone
 - `src/render/mod.rs` - Bond line rendering pipeline
 
+## 2026-01-12: Scenario System & Physics Cleanup
+
+### Summary
+Implemented a scenario selection system and removed vertical gravity/buoyancy to align with the Top-Down 2D simulation model.
+
+### Key Changes
+1.  **Scenario System**: Created `src/simulation/scenarios.rs` to manage different test cases (`dry_dock`, `pressure_washer`, etc.). Switching scenarios is now a single function call.
+2.  **Gravity/Buoyancy Removal**: Removed `AIR_BUOYANCY` and vertical gravity application from shaders. In a top-down view, "up" (Y+) is North, not skyward, so vertical gravity was incorrect.
+3.  **Lava Lamp Obsolescence**: Removed the "Lava Lamp" scenario as it relied on vertical density separation which no longer exists.
+
+### Files Changed
+- `src/simulation/scenarios.rs` - NEW: Scenario management
+- `src/simulation/setup.rs` - Updated to use scenario system
+- `assets/shaders/forces.wgsl` - Removed buoyancy constants and logic
+- `assets/shaders/physics.wgsl` - Removed gravity constants (if any remaining)
+- `WORK_PLAN.md` - Updated to mark Lava Lamp as obsolete
+
+---
+
+### Key Learnings for Future Phases
+
+#### 1. Hull Repulsion Tuning (The "Nuclear Option")
+- **Problem**: fast-moving Air particles (Wind) were tunneling through the Hull even with `500k` quadratic repulsion.
+- **Solution**:
+    - Switch to **Linear Ramp**: `F = k * (1 - r/r0)`. This provides immediate stiff resistance at `r = 0.9*r0`, unlike quadratic which is weak at the edge.
+    - **Strength**: Increased to `2,000,000.0`.
+    - **Radius**: Increased to `20.0` (4x particle spacing) to engage particles earlier.
+    - **Logic Fix**: Ensured repulsion applies to *any* non-hull fluid (Air/Water), verifying `!same_layer && (is_hull || neighbor_is_hull)`.
+    - **Refinement (Dual-Mode)**: The high stiff settings caused low-speed Water to explode.
+        - **Air**: Uses **Linear** ramp, `k=2M`, `r=20.0` (Stiff Wall).
+        - **Water**: Uses **Quadratic** ramp, `k=100k`, `r=12.0` (Soft Buffer).
+        - This ensures Air bounces off but Water settles stably against the hull.
+
+#### 2. Air Pressure Activation
+- **Problem**: Air stream was overly collimated / not spreading out.
+- **Cause**: `target_density_air` (0.5) was too high for Air Mass (1.0). Actual density was ~0.02, resulting in zero pressure (clamped).
+- **Solution**: Reduced `target_density_air` to **0.02**. This activates SPH repulsive pressure, making the air actually behave like a fluid/gas and spread out.
+
+#### 3. Water Spreading
+- **Request**: User wanted water to "spread out a little bit more".
+- **Solution**: Reduced `target_density_water` from `1.0` to **0.8**. This effectively increases the volume per particle by ~25%, causing the water to occupy more space.

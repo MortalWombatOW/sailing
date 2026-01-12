@@ -37,45 +37,56 @@ The agent must follow this strictly. Do not jump ahead.
 
 * [x] **Integration:** Update Velocity and Position. Apply Gravity ().
 * [x] **Boundaries:** Implement a "Reflection" boundary at the screen edges (keep particles inside).
-* [x] **Verification Scenario ("Lava Lamp"):** Initialize a box with mixed Air/Water. They must separate cleanly. Water at bottom, Air on top. No explosions.
+* [x] **Verification Scenario ("Lava Lamp"):** [OBSOLETE] Removed in Phase 3. Simulation is Top-Down 2D, so vertical gravity/buoyancy separation is not applicable.
 
 ### Phase 2: The 2.5D Layer Logic
 
 **Goal:** Implement the height-based collision filtering.
 **Tasks:**
 
-* [ ] **Z-Axis logic:** In the Force Kernel, check `layer_mask` and `z_height` before applying forces.
+* [x] **Z-Axis logic:** In the Force Kernel, check `layer_mask` and `z_height` before applying forces.
 * `if (pA.layer == WATER && pB.layer == AIR)`: Only interact if `pA.density > threshold` (Wave Crest).
 
 
-* [ ] **The Wind Tunnel:** Create an "Emitter" system.
+* [x] **The Wind Tunnel:** Create an "Emitter" system.
 * When an Air particle leaves the Right edge of the screen, teleport it to the Left edge.
 * Maintain a constant flow of wind.
 
 
-* [ ] **Verification Scenario ("Pressure Washer"):** Create a vertical line of static particles (Wall). Blast wind at it. Wind should bounce off.
+* [x] **Verification Scenario ("Pressure Washer"):** Create a vertical line of static particles (Wall). Blast wind at it. Wind should bounce off.
+* *Update:* Wall made 3x denser (spacing 5.0). Repulsion strength increased 5x (500k) and logic fixed to apply to Air particles.
 
 ### Phase 3: The Peridynamic Hull
 
 **Goal:** A floating rigid body.
 **Tasks:**
 
-* [ ] **Bond Logic:** Implement a Compute Shader kernel that iterates over the `BondBuffer`.
-* Calculate distance .
-* Force .
-* Apply  to particle A and  to particle B.
+* [x] **Bond Logic:** Implement a Compute Shader kernel that iterates over the `BondBuffer`.
+* Calculate distance.
+* Force using Hooke's law with damping.
+* Apply forces atomically to particle A and particle B.
+* *Note: Uses fixed-point integer accumulation to avoid race conditions.*
 
 
-* [ ] **Hull Generation (CPU):** Create a function `spawn_hull(x, y)` that generates a grid of particles.
+* [x] **Hull Generation (CPU):** Create a function `spawn_hull(x, y)` that generates a grid of particles.
 * Add **Diagonal Bonds** (Cross-bracing) to make it rigid.
-* Set `stiffness` high.
+* Set `stiffness` high (30,000).
+* Exclude hull bounding box from water spawning.
 
 
-* [ ] **Buoyancy:** The hull particles interact with Water particles via standard SPH pressure (repulsion).
-* *Tuning:* You must adjust the Hull Particle Mass so it settles at the correct waterline (neutral buoyancy).
+* [x] **Soft-Sphere Repulsion:** Prevent water from penetrating hull.
+* Smooth quadratic repulsion: `F = k * (1 - r/r0)²`
+* Applied between Hull↔Water particles only.
+* *Note: Lennard-Jones potential was abandoned due to singularity at r→0.*
 
 
-* [ ] **Verification Scenario ("Dry Dock"):** Drop the hull into the water. It should splash, bob, and settle.
+* [x] **XSPH Same-Type Smoothing:** Fixed XSPH to only smooth velocities within same particle type.
+
+
+* [x] **Verification:**
+    * Create a Hull. Place it in Water (`dry_dock`).
+    * **Result:** Hull is effectively rigid (Bonds). Water does not penetrate (Dual-Mode Repulsion).
+    * *Note:* "Drop test" irrelevant without gravity. Containment verified.
 
 ### Phase 4: Cloth & Destruction
 

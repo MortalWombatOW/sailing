@@ -15,10 +15,6 @@ const CLOSE_RANGE: f32 = 0.3;             // Fraction of h where close repulsion
 // Viscosity
 const VISCOSITY_MU: f32 = 2.0;            // Fluid thickness - higher = thicker/slower (was 0.5)
 
-// Buoyancy
-const AIR_BUOYANCY: f32 = 7.0;            // Base upward force on air particles
-const ARCHIMEDES_STRENGTH: f32 = 0.0;     // Extra buoyancy when air is submerged in water
-
 // Damping
 const VELOCITY_DAMPING: f32 = 0.999;        // Velocity retained per frame (0-1)
 
@@ -27,9 +23,11 @@ const XSPH_EPSILON: f32 = 0.5;             // Velocity smoothing strength (0-1, 
 
 // Soft-Sphere Hull-Water Repulsion (prevents water penetration)
 // Uses bounded linear spring: F = k * (r0 - r) when r < r0
-const LJ_STRENGTH: f32 = 100000.0;             // k - spring constant (force per unit overlap)
-const LJ_EQUILIBRIUM: f32 = 10.0;          // r0 - repulsion radius (particles pushed apart if closer)
-// Maximum possible force = LJ_STRENGTH * LJ_EQUILIBRIUM = 500 (bounded!)
+const LJ_STRENGTH_AIR: f32 = 2000000.0;       // Stiff barrier for high-speed air
+const LJ_RADIUS_AIR: f32 = 20.0;            // Wide radius to catch fast particles
+
+const LJ_STRENGTH_WATER: f32 = 100000.0;     // Softer barrier for resting water
+const LJ_RADIUS_WATER: f32 = 12.0;          // Narrower radius close to hull surface
 // =============================================================
 
 struct Particle {
@@ -229,17 +227,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     continue;
                 }
                 
-                // ==================== SOFT-SPHERE HULL-WATER REPULSION ====================
-                // Prevents water from penetrating hull using SMOOTH quadratic repulsion
-                // Formula: F = k * (1 - r/r0)^2 when r < r0, else 0
-                // This is smooth: at r=r0, both force AND its derivative are 0 (no sudden jump)
-                if (is_water && neighbor_is_hull) || (is_hull && neighbor_is_water) {
-                    if r_len < LJ_EQUILIBRIUM {
-                        let t = 1.0 - (r_len / LJ_EQUILIBRIUM);  // 0 at r0, 1 at r=0
-                        let smooth_force = LJ_STRENGTH * t * t;   // Quadratic ramp
-                        pressure_force += smooth_force * normalize(r);
+                // ==================== SOFT-SPHERE HULL-FLUID REPULSION ====================
+                if !same_layer && (is_hull || neighbor_is_hull) {
+                    let fluid_is_air = (is_hull && neighbor_is_air) || (is_air && neighbor_is_hull);
+
+                    let strength = select(LJ_STRENGTH_WATER, LJ_STRENGTH_AIR, fluid_is_air);
+                    let radius = select(LJ_RADIUS_WATER, LJ_RADIUS_AIR, fluid_is_air);
+
+                    if r_len < radius {
+                        let t = 1.0 - (r_len / radius);
+                        var force: f32;
+
+                        if fluid_is_air {
+                            // Linear Ramp for Air (Stiff barrier)
+                            force = strength * t;
+                        } else {
+                            // Quadratic Ramp for Water (Soft settling)
+                            force = strength * t * t;
+                        }
+                        pressure_force += force * normalize(r);
                     }
                 }
+                // =============================================================================
                 // =============================================================================
 
                 // Pressure force (symmetric formulation) - repulsion
@@ -274,18 +283,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Apply XSPH smoothing to reduce oscillation
     p.vel += XSPH_EPSILON * xsph_correction;
     
-    // Apply gravity with buoyancy (only to water and air, NOT hull)
-    let is_air = (p.layer_mask & 2u) != 0u;
-    let is_hull = (p.layer_mask & 4u) != 0u;
-
-    if is_water {
-        p.vel.y += params.gravity * params.delta_time;
-    } else if is_air && !is_hull {
-        // Archimedes buoyancy: stronger when surrounded by water
-        let archimedes_force = ARCHIMEDES_STRENGTH * water_density_around * abs(params.gravity);
-        p.vel.y += (AIR_BUOYANCY + archimedes_force) * params.delta_time;
-    }
-    // Hull particles get no gravity or buoyancy - they only move via bond forces and SPH pressure
     
     // Apply damping to prevent energy buildup
     p.vel *= VELOCITY_DAMPING;

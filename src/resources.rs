@@ -143,8 +143,8 @@ impl Default for SimParams {
             delta_time: 0.04, // 40ms timestep (stable)
             gravity: 0.0,     // Standard gravity (faster particles)
             smoothing_radius: 10.0,
-            target_density_water: 1.0,  // Target 1.0 ensures positive pressure with mass=50
-            target_density_air: 0.5,    // Target 0.5 for air
+            target_density_water: 0.2, 
+            target_density_air: 0.02,
             wind_interaction_threshold: 0.5,
             rudder_angle: 0.0,
             sheet_extension: 1.0,
