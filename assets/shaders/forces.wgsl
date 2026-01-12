@@ -3,25 +3,27 @@
 
 // ==================== TUNABLE PARAMETERS ====================
 // Pressure (Tait EOS)
-const PRESSURE_STIFFNESS: f32 = 3.0;      // B - higher = stronger repulsion
+const PRESSURE_STIFFNESS: f32 = 5.0;      // B - higher = stronger repulsion
 const PRESSURE_GAMMA: f32 = 7.0;          // Exponent - higher = stiffer at high density  
 const PRESSURE_CAP: f32 = 2000.0;         // Maximum pressure to prevent explosions
 
 // Kernel distances
-const MIN_DISTANCE: f32 = 0.01;           // Minimum distance to prevent singularity
+const MIN_DISTANCE: f32 = 0.003;           // Minimum distance to prevent singularity
+const CLOSE_REPULSION: f32 = 0.0;        // Disabled - was adding energy causing vortices
+const CLOSE_RANGE: f32 = 0.3;             // Fraction of h where close repulsion kicks in (0-1)
 
 // Viscosity
-const VISCOSITY_MU: f32 = 0.1;            // Fluid thickness - higher = thicker/slower
+const VISCOSITY_MU: f32 = 0.5;            // Fluid thickness - higher = thicker/slower
 
 // Buoyancy
-const AIR_BUOYANCY: f32 = 1.0;            // Base upward force on air particles
-const ARCHIMEDES_STRENGTH: f32 = 2.0;     // Extra buoyancy when air is submerged in water
+const AIR_BUOYANCY: f32 = 7.0;            // Base upward force on air particles
+const ARCHIMEDES_STRENGTH: f32 = 0.0;     // Extra buoyancy when air is submerged in water
 
 // Damping
-const VELOCITY_DAMPING: f32 = 0.95;        // Velocity retained per frame (0-1)
+const VELOCITY_DAMPING: f32 = 0.999;        // Velocity retained per frame (0-1)
 
 // XSPH Smoothing (reduces oscillation)
-const XSPH_EPSILON: f32 = 1.0;             // Velocity smoothing strength (0-1, higher = more smoothing)
+const XSPH_EPSILON: f32 = 0.0;             // Velocity smoothing strength (0-1, higher = more smoothing)
 // =============================================================
 
 struct Particle {
@@ -83,16 +85,25 @@ fn poly6_kernel(r_sq: f32, h: f32) -> f32 {
     return coeff * diff * diff * diff;
 }
 
-// Spiky kernel gradient for pressure force (2D version)
-fn spiky_gradient(r: vec2<f32>, r_len: f32, h: f32) -> vec2<f32> {
-    if r_len >= h || r_len < MIN_DISTANCE {
+fn wendland_c2_gradient(r: vec2<f32>, r_len: f32, h: f32) -> vec2<f32> {
+    if r_len >= h || r_len < 0.01 {
         return vec2<f32>(0.0, 0.0);
     }
-    // 2D spiky gradient: -30 / (π * h^5) * (h - r)² * r̂
-    let h5 = h * h * h * h * h;
-    let coeff = -30.0 / (3.14159265359 * h5);
-    let diff = h - r_len;
-    return coeff * diff * diff * normalize(r);
+
+    let q = r_len / h;
+    
+    // 2D Wendland C2: W(q) = 7/(πh²) * (1-q)⁴ * (1+4q)
+    // Gradient: ∇W = -140q/(πh³) * (1-q)³ * r̂
+    // Simplified: coeff * (1-q)³ * q * r̂
+
+    let one_minus_q = 1.0 - q;
+    let term3 = one_minus_q * one_minus_q * one_minus_q;
+
+    let h3 = h * h * h;
+    let coeff = -140.0 / (3.14159265359 * h3);
+    
+    // r̂ = r / r_len (unit vector)
+    return coeff * term3 * q * normalize(r);
 }
 
 // Viscosity kernel laplacian (2D version)
@@ -110,11 +121,11 @@ fn viscosity_laplacian(r_len: f32, h: f32) -> f32 {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
     let particle_count = arrayLength(&particles);
-    
+
     if idx >= particle_count {
         return;
     }
-    
+
     var p = particles[idx];
     let h = params.smoothing_radius;
     
@@ -128,7 +139,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Use stored cell_id to derive cell coordinates (avoids floating point precision mismatches)
     let cell_x = i32(p.cell_id % grid.grid_width);
     let cell_y = i32(p.cell_id / grid.grid_width);
-    
+
     var pressure_force = vec2<f32>(0.0, 0.0);
     var viscosity_force = vec2<f32>(0.0, 0.0);
     var xsph_correction = vec2<f32>(0.0, 0.0);  // XSPH velocity smoothing
@@ -139,21 +150,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var dx = -1; dx <= 1; dx++) {
             let nx = cell_x + dx;
             let ny = cell_y + dy;
-            
+
             if nx < 0 || ny < 0 || u32(nx) >= grid.grid_width || u32(ny) >= grid.grid_height {
                 continue;
             }
-            
+
             let neighbor_cell_id = u32(ny) * grid.grid_width + u32(nx);
             
             // Counting sort layout: cell_offsets[i] = start, cell_offsets[i+1] = end
             let cell_start = cell_offsets[neighbor_cell_id];
             let cell_end = cell_offsets[neighbor_cell_id + 1u];
-            
+
             if cell_start >= cell_end {
                 continue;
             }
-            
+
             for (var j = cell_start; j < cell_end; j++) {
                 let neighbor_idx = indices[j];
                 
@@ -161,18 +172,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 if neighbor_idx == idx {
                     continue;
                 }
-                
+
                 let neighbor = particles[neighbor_idx];
                 let r = p.pos - neighbor.pos;
                 let r_len = length(r);
-                
+
                 if r_len >= h || r_len < MIN_DISTANCE {
                     continue;
                 }
                 
                 // Pressure force (symmetric formulation) - repulsion
                 let pressure_term = (p.pressure + neighbor.pressure) / (2.0 * neighbor.density);
-                pressure_force -= neighbor.mass * pressure_term * spiky_gradient(r, r_len, h);
+                pressure_force -= neighbor.mass * pressure_term * wendland_c2_gradient(r, r_len, h);
+                
+                // Close-range repulsion to prevent clumping (tensile correction)
+                let close_threshold = h * CLOSE_RANGE;
+                if r_len < close_threshold {
+                    let close_factor = (close_threshold - r_len) / close_threshold;  // 0 at threshold, 1 at 0
+                    pressure_force += CLOSE_REPULSION * close_factor * close_factor * normalize(r);
+                }
                 
                 // Viscosity force
                 let vel_diff = neighbor.vel - p.vel;
@@ -212,6 +230,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // Apply damping to prevent energy buildup
     p.vel *= VELOCITY_DAMPING;
-    
+
     particles[idx] = p;
 }

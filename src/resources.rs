@@ -140,8 +140,8 @@ pub struct SimParams {
 impl Default for SimParams {
     fn default() -> Self {
         Self {
-            delta_time: 0.064, // 64ms timestep (doubled for faster sim)
-            gravity: -9.8,     // Standard gravity
+            delta_time: 0.04, // 40ms timestep (stable)
+            gravity: -9.8,     // Standard gravity (faster particles)
             smoothing_radius: 10.0,
             target_density_water: 1.0,  // Target 1.0 ensures positive pressure with mass=50
             target_density_air: 0.5,    // Target 0.5 for air

@@ -41,17 +41,24 @@ struct SimParams {
 @group(0) @binding(3) var<uniform> grid: GridParams;
 @group(0) @binding(4) var<uniform> params: SimParams;
 
-// Poly6 kernel for density estimation (2D version)
-fn poly6_kernel(r_sq: f32, h: f32) -> f32 {
-    let h_sq = h * h;
-    if r_sq >= h_sq {
+fn wendland_c2_kernel(r_sq: f32, h: f32) -> f32 {
+    // Wendland C2 has support radius 2h, so q ∈ [0, 2]
+    let r = sqrt(r_sq);
+    let q = r / h;
+    
+    if q >= 2.0 {
         return 0.0;
     }
-    let diff = h_sq - r_sq;
-    // 2D poly6: 4 / (π * h^8) * (h² - r²)³
-    let h8 = h_sq * h_sq * h_sq * h_sq;
-    let coeff = 4.0 / (3.14159265359 * h8);
-    return coeff * diff * diff * diff;
+    
+    // 2D Wendland C2: 7 / (4πh^2) * (1 - q/2)^4 * (2q + 1)
+    let one_minus_q_half = 1.0 - q * 0.5;
+    let term2 = one_minus_q_half * one_minus_q_half;
+    let term4 = term2 * term2;
+    
+    let h_sq = h * h;
+    let coeff = 7.0 / (4.0 * 3.14159265359 * h_sq);
+    
+    return coeff * term4 * (2.0 * q + 1.0);
 }
 
 @compute @workgroup_size(64)
@@ -104,7 +111,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let r_sq = dot(diff, diff);
                 
                 // Accumulate density contribution
-                density += neighbor.mass * poly6_kernel(r_sq, h);
+                density += neighbor.mass * wendland_c2_kernel(r_sq, h);
             }
         }
     }

@@ -32,7 +32,7 @@ struct SimParams {
 
 // ==================== BOUNDARY PARAMETERS ====================
 const BOUNDARY_STIFFNESS: f32 = 500.0;    // Repulsion strength - higher = harder bounce
-const BOUNDARY_RANGE: f32 = 20.0;         // Distance at which repulsion starts
+const BOUNDARY_RANGE: f32 = 4.0;         // Distance at which repulsion starts
 const BOUNDARY_MARGIN: f32 = 2.0;         // Hard stop margin (safety fallback)
 const MAX_VELOCITY: f32 = 500.0;          // Velocity cap to prevent explosions
 // =============================================================
@@ -55,11 +55,11 @@ fn boundary_force(distance_to_wall: f32) -> f32 {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
     let particle_count = arrayLength(&particles);
-    
+
     if idx >= particle_count {
         return;
     }
-    
+
     var p = particles[idx];
     
     // Calculate distances to each boundary
@@ -91,7 +91,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let max_x = params.bounds.y - BOUNDARY_MARGIN;
     let min_y = params.bounds.z + BOUNDARY_MARGIN;
     let max_y = params.bounds.w - BOUNDARY_MARGIN;
-    
+
     if p.pos.x < min_x {
         p.pos.x = min_x;
         p.vel.x = abs(p.vel.x) * 0.3;
@@ -114,6 +114,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if vel_len > MAX_VELOCITY {
         p.vel = normalize(p.vel) * MAX_VELOCITY;
     }
-    
+
     particles[idx] = p;
 }
