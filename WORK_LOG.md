@@ -1,5 +1,31 @@
 # Work Log
 
+## 2026-01-12: XSPH Same-Type Velocity Smoothing
+
+### Summary
+Fixed XSPH velocity smoothing to only occur between particles of the same type (water↔water, air↔air, hull↔hull).
+
+### Problem
+XSPH was averaging velocities between ALL particles that passed layer checks, including hull↔water interactions. This caused hull particles to be dragged by surrounding water flow, breaking rigid body behavior.
+
+### Solution
+Wrapped XSPH accumulation in the existing `same_layer` check:
+```wgsl
+if same_layer {
+    let avg_density = (p.density + neighbor.density) * 0.5;
+    let w = poly6_kernel(r_len * r_len, h);
+    xsph_correction += (neighbor.mass / avg_density) * vel_diff * w;
+}
+```
+
+### Key Learning
+**XSPH is fluid-specific**: Velocity smoothing creates coherent motion within a fluid phase. Applying it across different materials (water, hull) causes unintended coupling. For rigid bodies like hulls, velocity coherence should come from bond forces, not XSPH.
+
+### File Changed
+- `assets/shaders/forces.wgsl` - Added `same_layer` guard around XSPH accumulation
+
+---
+
 ## 2026-01-10: Phase 0 - GPU Boilerplate Complete
 
 ### Summary

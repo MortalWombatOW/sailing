@@ -257,10 +257,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let vel_diff = neighbor.vel - p.vel;
                 viscosity_force += VISCOSITY_MU * neighbor.mass * (vel_diff / neighbor.density) * viscosity_laplacian(r_len, h);
                 
-                // XSPH velocity smoothing - averages velocity with neighbors
-                let avg_density = (p.density + neighbor.density) * 0.5;
-                let w = poly6_kernel(r_len * r_len, h);
-                xsph_correction += (neighbor.mass / avg_density) * vel_diff * w;
+                // XSPH velocity smoothing - averages velocity with neighbors OF THE SAME TYPE
+                if same_layer {
+                    let avg_density = (p.density + neighbor.density) * 0.5;
+                    let w = poly6_kernel(r_len * r_len, h);
+                    xsph_correction += (neighbor.mass / avg_density) * vel_diff * w;
+                }
             }
         }
     }
