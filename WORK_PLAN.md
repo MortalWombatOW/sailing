@@ -109,15 +109,20 @@ The agent must follow this strictly. Do not jump ahead.
   * *Critical:* Prevents air bouncing off hull and mast exploding with sail.
 
 * [x] **Bond Stiffness Tuning:**
-  * Hull: 30,000 | Mast/Spar: 20,000 | Sail: 15,000 | Fuse: 30,000
+  * Hull: 30,000 | Mast/Spar: 20,000 | Sail: 15,000 | Fuse/Mast-Spar: **100,000**
+  * Skip-2 spar bonds for bending resistance (2× stiffness)
 
 * [x] **Fracture Logic:**
   * Already implemented in `bonds.wgsl`.
-  * Fuse breaking_strain: 2.0 (non-breaking for normal operation).
+  * Fuse breaking_strain: **10.0** (essentially unbreakable).
 
 * [x] **Aerodynamics:** Apply simplified Drag to Sail particles.
-  * Air-sail repulsion: 5,000 strength, 10.0 radius (gentle).
+  * Air-sail repulsion: **25,000** strength, 15.0 radius.
   * Wind speed: 50 px/s (gentle test wind).
+  * Energy conservation: Fluid↔solid pairs skip SPH forces (only soft-sphere).
+
+* [x] **Rendering Improvements:**
+  * Air particles render at half size (1.5 vs 3.0) for less visual clutter.
 
 * [x] **Verification Scenario ("The Hurricane"):**
   * `scenario_hurricane()` in `scenarios.rs`.

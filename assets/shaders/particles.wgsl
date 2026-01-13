@@ -49,6 +49,7 @@ const QUAD_VERTICES: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
 );
 
 const PARTICLE_SIZE: f32 = 3.0;
+const AIR_PARTICLE_SIZE: f32 = 1.5;  // Air renders at half size
 
 @vertex
 fn vertex(
@@ -60,10 +61,14 @@ fn vertex(
     let particle = particles[instance_index];
     let quad_vertex = QUAD_VERTICES[vertex_index];
     
+    // Use smaller size for air particles
+    let is_air = (particle.layer_mask & 2u) != 0u;
+    let size = select(PARTICLE_SIZE, AIR_PARTICLE_SIZE, is_air);
+    
     // Calculate world position
     let world_pos = vec3<f32>(
-        particle.pos.x + quad_vertex.x * PARTICLE_SIZE,
-        particle.pos.y + quad_vertex.y * PARTICLE_SIZE,
+        particle.pos.x + quad_vertex.x * size,
+        particle.pos.y + quad_vertex.y * size,
         0.0
     );
     
@@ -77,9 +82,8 @@ fn vertex(
     let speed = length(particle.vel);
     let normalized_speed = clamp(speed / 100.0, 0.0, 1.0);
     
-    // Check particle type by layer_mask
+    // Check particle type by layer_mask (is_air already defined above for sizing)
     let is_water = (particle.layer_mask & 1u) != 0u;
-    let is_air = (particle.layer_mask & 2u) != 0u;
     let is_hull = (particle.layer_mask & 4u) != 0u;
     let is_sail = (particle.layer_mask & 8u) != 0u;
     let is_mast = (particle.layer_mask & 16u) != 0u;

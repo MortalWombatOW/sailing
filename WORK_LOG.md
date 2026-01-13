@@ -1,5 +1,51 @@
 # Work Log
 
+## 2026-01-13: Phase 4 Continued - Energy Conservation & Bond Strengthening
+
+### Summary
+Further refined sail physics with focus on energy conservation, stronger bond connections, and visual improvements.
+
+### Key Fixes
+
+#### 1. Energy Conservation Fix (Air Bouncing with More Speed)
+**Problem:** Air particles were gaining speed after bouncing off the sail - violating energy conservation.
+
+**Root Cause:** Fluid↔solid pairs (air↔sail) received BOTH:
+- Soft-sphere repulsion (distance-based)
+- SPH pressure + close-range repulsion + viscosity
+
+This double force application caused energy gain.
+
+**Solution:** After soft-sphere repulsion, `continue` to skip SPH forces for fluid↔solid pairs.
+```wgsl
+if is_fluid != neighbor_is_fluid {
+    continue;  // Only soft-sphere, no SPH forces
+}
+```
+
+#### 2. Spar Bending Resistance (Skip-2 Bonds)
+**Problem:** Spar bent inward ( shape) when sail pulled on it.
+
+**Solution:** Added skip-2 vertical bonds connecting every other particle (y+2) with 2× stiffness. This creates bending resistance similar to a real beam.
+
+#### 3. Bond Stiffness Updates
+| Connection | Old Stiffness | New Stiffness |
+|------------|---------------|---------------|
+| Fuse (Mast-Hull) | 30,000 | **100,000** |
+| Mast-Spar | 20,000 | **100,000** |
+| Breaking strain | 2.0 | **10.0** |
+
+#### 4. Air Particle Rendering
+- Air particles now render at **half size** (1.5 vs 3.0)
+- Less visual clutter, easier to see sail/hull
+
+### Files Changed
+- `assets/shaders/forces.wgsl` - Skip SPH for fluid↔solid, increase air-sail repulsion to 25,000
+- `assets/shaders/particles.wgsl` - Air particles render at half size
+- `src/simulation/setup.rs` - Skip-2 spar bonds, increased fuse/mast-spar stiffness to 100,000
+
+---
+
 ## 2026-01-12: Phase 4 Refinement - Z-Height Layer System & Spar Implementation
 
 ### Summary

@@ -13,7 +13,7 @@ use super::scenarios;
 
 // ==================== SIMULATION CONFIG ====================
 /// Number of particles in the simulation
-pub const PARTICLE_COUNT: usize = 300;
+pub const PARTICLE_COUNT: usize = 10000;
 /// Max number of bonds
 pub const BOND_COUNT: usize = 20_000;
 
@@ -194,8 +194,8 @@ impl FromWorld for BondBuffer {
         const HULL_STIFFNESS: f32 = 30_000.0;      // Rigid hull
         const SAIL_STIFFNESS: f32 = 15_000.0;      // Rigid sail panel
         const MAST_STIFFNESS: f32 = 20_000.0;      // Stiff mast
-        const FUSE_STIFFNESS: f32 = 30_000.0;      // Mast-hull connection (same as hull - very strong)
-        const FUSE_BREAKING_STRAIN: f32 = 2.0;     // Same as other bonds (non-breaking)
+        const FUSE_STIFFNESS: f32 = 100_000.0;     // Mast-hull connection (extremely strong)
+        const FUSE_BREAKING_STRAIN: f32 = 10.0;    // Essentially unbreakable
         // ===============================================================
         
         use scenarios::config::*;
@@ -521,6 +521,21 @@ impl FromWorld for BondBuffer {
                         _padding: 0,
                     });
                 }
+                
+                // Skip-2 vertical bonds for bending resistance (keeps spar straight)
+                if y + 2 < spar_len {
+                    let skip_idx = spar_start_idx + (y + 2) * spar_depth + x;
+                    bonds.push(Bond {
+                        particle_a: idx as u32,
+                        particle_b: skip_idx as u32,
+                        rest_length: hurricane_config::SAIL_SPACING * 2.0,
+                        stiffness: MAST_STIFFNESS * 2.0, // Extra stiff for bending resistance
+                        breaking_strain: BOND_BREAKING_STRAIN,
+                        bond_type: 2,
+                        is_active: 1,
+                        _padding: 0,
+                    });
+                }
             }
         }
         
@@ -535,7 +550,7 @@ impl FromWorld for BondBuffer {
                 particle_a: mast_center as u32,
                 particle_b: spar_left_idx as u32,
                 rest_length: rest_len.max(hurricane_config::SAIL_SPACING),
-                stiffness: MAST_STIFFNESS,
+                stiffness: FUSE_STIFFNESS, // Same as mast-hull (extremely strong)
                 breaking_strain: BOND_BREAKING_STRAIN,
                 bond_type: 2,
                 is_active: 1,

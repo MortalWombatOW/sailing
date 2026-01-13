@@ -237,12 +237,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 // Prevents fluid from penetrating solids at the same z level
                 if is_fluid != neighbor_is_fluid {
                     // At z=0: Water↔Hull repulsion (strong barrier)
-                    // At z=2: Air↔Sail repulsion (gentle - sail catches wind)
+                    // At z=2: Air↔Sail repulsion (sail deflects wind)
                     let is_air_layer = is_air || neighbor_is_air;
                     
-                    // Air-sail uses MUCH softer settings (sail is light, catches wind gently)
-                    let strength = select(LJ_STRENGTH_WATER, 5000.0, is_air_layer);
-                    let radius = select(LJ_RADIUS_WATER, 10.0, is_air_layer);
+                    // Air-sail repulsion - strong enough to deflect wind
+                    let strength = select(LJ_STRENGTH_WATER, 25000.0, is_air_layer);
+                    let radius = select(LJ_RADIUS_WATER, 15.0, is_air_layer);
 
                     if r_len < radius {
                         let t = 1.0 - (r_len / radius);
@@ -252,8 +252,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     }
                 }
                 // =============================================================================
+                
+                // For fluid↔solid pairs, ONLY use soft-sphere repulsion (skip SPH forces)
+                // This prevents double force application and energy gain
+                if is_fluid != neighbor_is_fluid {
+                    continue;
+                }
 
                 // Pressure force (symmetric formulation) - repulsion
+                // Only applies to same-type pairs (water↔water, air↔air, hull↔hull, sail↔sail)
                 let pressure_term = (p.pressure + neighbor.pressure) / (2.0 * neighbor.density);
                 pressure_force -= neighbor.mass * pressure_term * wendland_c2_gradient(r, r_len, h);
                 
