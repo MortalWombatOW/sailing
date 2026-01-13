@@ -1,5 +1,97 @@
 # Work Log
 
+## 2026-01-12: Phase 4 Refinement - Z-Height Layer System & Spar Implementation
+
+### Summary
+Refined the hurricane sail scenario with proper z-height-based layer separation and added a rigid spar connecting mast to sail.
+
+### Key Learnings
+
+#### 1. Z-Height Layer System
+Particles now use `z_height` to control which types interact via SPH forces:
+| z | Particles | Interactions |
+|---|-----------|--------------|
+| 0 | Water, Hull | Water↔Hull SPH |
+| 1 | Mast, Spar | **Isolated** (bonds only, no SPH peers) |
+| 2 | Air, Sail | Air↔Sail SPH |
+
+- **Critical:** Without z-height filtering, air was bouncing off the hull and spar was exploding due to mast↔sail interactions.
+- **Implementation:** Added `z_height` checks in `density.wgsl` and `forces.wgsl` with 0.5 threshold.
+
+#### 2. Spar (Boom) Implementation
+Added a rigid spar connecting mast to sail:
+- **Structure:** 10x2 grid of mast particles at z=1 (isolated)
+- **Bonds:** Horizontal, vertical, and diagonal for rigidity
+- **Connections:** Mast center → Spar left column, Spar right column → Sail left edge
+
+#### 3. Sail Tuning Parameters
+| Parameter | Initial | Final | Notes |
+|-----------|---------|-------|-------|
+| Sail mass | 10 | 400 | Prevents explosion from air pressure |
+| Sail stiffness | 1,000 | 15,000 | Rigid panel, not cloth |
+| Sail shape | 8×6 grid | 2×10 line | Perpendicular to wind |
+| Air-sail repulsion | 50,000 | 5,000 | Gentler wind interaction |
+| Wind speed | 400 | 50 | Gentle test wind |
+| Fuse stiffness | 5,000 | 30,000 | Strong mast-hull connection |
+
+#### 4. Bond Stiffness Summary
+| Type | Stiffness |
+|------|-----------|
+| Hull | 30,000 |
+| Mast/Spar | 20,000 |
+| Sail | 15,000 |
+| Fuse (Mast-Hull) | 30,000 |
+| Sail-Spar | 30,000 (2× sail) |
+
+### Files Changed
+- `src/resources.rs` - z_height values for air=2, sail=2, mast=1
+- `src/simulation/scenarios.rs` - Spar spawning (10×2 grid), updated hurricane_config
+- `src/simulation/setup.rs` - Spar bond generation, increased fuse stiffness
+- `assets/shaders/density.wgsl` - z_height check before density accumulation
+- `assets/shaders/forces.wgsl` - z_height check before force application, cleaned up layer logic
+
+---
+
+## 2026-01-12: Phase 4 - Cloth & Destruction Implementation
+
+### Summary
+Implemented flexible sails and breakable masts using Peridynamic bonds with per-type stiffness values.
+
+### Key Additions
+
+#### 1. Sail & Mast Particles
+- Added `Particle::new_sail()` (mass=10, layer_mask=8) and `Particle::new_mast()` (mass=500, layer_mask=16) in `resources.rs`.
+- Rendering colors: Sail=cream canvas, Mast=dark brown wood.
+
+#### 2. Hurricane Test Scenario
+- `scenario_hurricane()` in `scenarios.rs` creates:
+  - Locked hull (single row, mass=100000)
+  - Mast column (15 particles rising from hull center)
+  - Sail grid (12x10 attached to mast)
+  - Hurricane wind (400 px/s from left)
+
+#### 3. Per-Type Bond Stiffness
+- **Hull:** 30,000 (rigid)
+- **Mast:** 20,000 (stiff)
+- **Sail:** 1,000 (cloth-like flex, NO DIAGONALS for shear)
+- **Fuse (Mast-Hull):** 5,000 with 0.3 breaking_strain (breaks under storm stress)
+
+#### 4. Sail Aerodynamics
+- Wind force: `F = 0.15 * (wind_vel - particle.vel)` (simplified relative velocity)
+- Quadratic drag: `F = -0.3 * |v| * v`
+
+### Files Changed
+- `src/resources.rs` - new_sail(), new_mast() constructors
+- `src/simulation/scenarios.rs` - scenario_hurricane(), hurricane_config module
+- `src/simulation/setup.rs` - Sail/mast/fuse bond generation with tiered stiffness
+- `assets/shaders/particles.wgsl` - Sail and mast particle colors
+- `assets/shaders/forces.wgsl` - Sail aerodynamics section
+
+### Testing
+To verify: In `scenarios.rs`, change `spawn_particles()` to call `scenario_hurricane(particle_count)`, then `cargo run`.
+
+---
+
 ## 2026-01-12: XSPH Same-Type Velocity Smoothing
 
 ### Summary

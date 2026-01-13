@@ -110,16 +110,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let diff = p.pos - neighbor.pos;
                 let r_sq = dot(diff, diff);
                 
+                // Z-HEIGHT CHECK: Skip density contribution from particles at different z levels
+                // z=0: Water, Hull
+                // z=1: Air, Sail, Mast
+                let z_diff = abs(p.z_height - neighbor.z_height);
+                if z_diff > 0.5 {
+                    continue;
+                }
+                
                 // Layer Logic:
                 // 1. Same layer always interacts
-                // 2. Anything interacts with Hull (Layer 4)
-                // 3. Water (1) and Air (2) do NOT interact directly in Density phase (they ignore each other)
+                // 2. Solids (Hull, Sail, Mast) interact with fluids at same z level
+                // 3. Water (1) and Air (2) do NOT interact directly (they're at different z anyway)
                 let layer_mask_hull = 4u;
+                let layer_mask_sail = 8u;
+                let layer_mask_mast = 16u;
                 let is_hull = (p.layer_mask & layer_mask_hull) != 0u;
                 let neighbor_is_hull = (neighbor.layer_mask & layer_mask_hull) != 0u;
+                let is_solid = (p.layer_mask & (layer_mask_hull | layer_mask_sail | layer_mask_mast)) != 0u;
+                let neighbor_is_solid = (neighbor.layer_mask & (layer_mask_hull | layer_mask_sail | layer_mask_mast)) != 0u;
                 let same_layer = (p.layer_mask == neighbor.layer_mask);
 
-                if !same_layer && !is_hull && !neighbor_is_hull {
+                if !same_layer && !is_solid && !neighbor_is_solid {
                     continue;
                 }
 

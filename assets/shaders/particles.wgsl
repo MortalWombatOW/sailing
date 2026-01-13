@@ -81,12 +81,24 @@ fn vertex(
     let is_water = (particle.layer_mask & 1u) != 0u;
     let is_air = (particle.layer_mask & 2u) != 0u;
     let is_hull = (particle.layer_mask & 4u) != 0u;
+    let is_sail = (particle.layer_mask & 8u) != 0u;
+    let is_mast = (particle.layer_mask & 16u) != 0u;
 
     var color: vec3<f32>;
     if is_hull {
         // Hull particles: brown/wood color
         let base_color = vec3<f32>(0.55, 0.35, 0.2);
         let stressed_color = vec3<f32>(0.7, 0.4, 0.2); // Lighter when moving fast
+        color = mix(base_color, stressed_color, normalized_speed);
+    } else if is_mast {
+        // Mast particles: dark wood
+        let base_color = vec3<f32>(0.3, 0.2, 0.1);
+        let stressed_color = vec3<f32>(0.5, 0.3, 0.15);
+        color = mix(base_color, stressed_color, normalized_speed);
+    } else if is_sail {
+        // Sail particles: creamy white canvas
+        let base_color = vec3<f32>(0.95, 0.90, 0.80);
+        let stressed_color = vec3<f32>(1.0, 0.7, 0.5);  // Orange when stressed
         color = mix(base_color, stressed_color, normalized_speed);
     } else if is_water {
         // Water particles: blue color range

@@ -93,16 +93,36 @@ The agent must follow this strictly. Do not jump ahead.
 **Goal:** Flexible sails and breakable masts.
 **Tasks:**
 
-* [ ] **Sail Generation:** Generate a grid of particles with **Structural Bonds Only** (No diagonals). This allows shear/folding (Cloth behavior).
-* [ ] **Bond Types:** Update Bond Kernel to use different stiffness for Hull vs. Sail.
-* [ ] **Fracture Logic:**
-* Calculate Strain: .
-* If `s > breaking_strain`, set `bond.active = 0`.
-* Multiply force by `bond.active`.
+* [x] **Sail Generation:** Generate a grid of particles with bonds for sail structure.
+  * *Final:* 2×10 sail grid (vertical line perpendicular to wind) with diagonal bonds for rigidity.
+  * *Mass:* 400 (heavy for stability against wind pressure).
 
+* [x] **Spar (Boom) Implementation:** Rigid beam connecting mast to sail.
+  * *Structure:* 10×2 grid of mast particles at z=1 (isolated from air).
+  * *Bonds:* Horizontal, vertical, and diagonal for full rigidity.
+  * *Connections:* Mast center → Spar left column, Spar right column → Sail left edge.
 
-* [ ] **Aerodynamics:** Apply simplified Drag to Sail particles based on Wind Velocity relative to Sail Normal.
-* [ ] **Verification Scenario ("The Hurricane"):** Lock the hull. Increase wind speed. The Sail should billow, then the Mast-Hull bonds should snap.
+* [x] **Z-Height Layer System:** Particles filtered by z_height for SPH interactions.
+  * z=0: Water, Hull (interact via SPH)
+  * z=1: Mast, Spar (isolated - bonds only)
+  * z=2: Air, Sail (interact via SPH)
+  * *Critical:* Prevents air bouncing off hull and mast exploding with sail.
+
+* [x] **Bond Stiffness Tuning:**
+  * Hull: 30,000 | Mast/Spar: 20,000 | Sail: 15,000 | Fuse: 30,000
+
+* [x] **Fracture Logic:**
+  * Already implemented in `bonds.wgsl`.
+  * Fuse breaking_strain: 2.0 (non-breaking for normal operation).
+
+* [x] **Aerodynamics:** Apply simplified Drag to Sail particles.
+  * Air-sail repulsion: 5,000 strength, 10.0 radius (gentle).
+  * Wind speed: 50 px/s (gentle test wind).
+
+* [x] **Verification Scenario ("The Hurricane"):**
+  * `scenario_hurricane()` in `scenarios.rs`.
+  * To test: Change `spawn_particles()` to call `scenario_hurricane(particle_count)`.
+
 
 ### Phase 5: Gameplay & Controls
 

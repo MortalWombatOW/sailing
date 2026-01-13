@@ -55,8 +55,38 @@ impl Particle {
             mass: 25.0, // Air mass (increased for stability)
             density: 0.0,
             pressure: 0.0,
-            z_height: 0.0,
+            z_height: 2.0, // Air at z=2 (same level as sail)
             layer_mask: layer::AIR,
+            cell_id: 0,
+            _padding: [0.0; 2],
+        }
+    }
+
+    /// Create a new sail particle at the given position with velocity
+    pub fn new_sail(pos: [f32; 2], vel: [f32; 2]) -> Self {
+        Self {
+            pos,
+            vel,
+            mass: 400.0, // Sail fabric (heavier for stability)
+            density: 0.0,
+            pressure: 0.0,
+            z_height: 2.0, // Sail at z=2 (same level as air)
+            layer_mask: layer::SAIL,
+            cell_id: 0,
+            _padding: [0.0; 2],
+        }
+    }
+
+    /// Create a new mast particle at the given position with velocity
+    pub fn new_mast(pos: [f32; 2], vel: [f32; 2]) -> Self {
+        Self {
+            pos,
+            vel,
+            mass: 500.0, // Heavy wooden mast
+            density: 0.0,
+            pressure: 0.0,
+            z_height: 1.0, // Mast at z=1 (isolated - bonds only)
+            layer_mask: layer::MAST,
             cell_id: 0,
             _padding: [0.0; 2],
         }

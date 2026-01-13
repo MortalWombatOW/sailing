@@ -186,11 +186,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 }
                 
                 // =============================================================
-                // 2.5D LAYER LOGIC
+                // 2.5D LAYER LOGIC (Z-Height Based)
+                // z=0: Water, Hull (interact with each other)
+                // z=1: Air, Sail (interact with each other)
+                // Particles at different z levels do NOT interact!
                 // =============================================================
                 let layer_water = 1u;
                 let layer_air = 2u;
                 let layer_hull = 4u;
+                let layer_sail = 8u;
 
                 let is_air = (p.layer_mask & layer_air) != 0u;
                 let is_water = (p.layer_mask & layer_water) != 0u;
@@ -198,57 +202,55 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let neighbor_is_air = (neighbor.layer_mask & layer_air) != 0u;
                 let neighbor_is_hull = (neighbor.layer_mask & layer_hull) != 0u;
                 let is_hull = (p.layer_mask & layer_hull) != 0u;
+                let is_sail = (p.layer_mask & layer_sail) != 0u;
+                let neighbor_is_sail = (neighbor.layer_mask & layer_sail) != 0u;
                 let same_layer = (p.layer_mask == neighbor.layer_mask);
+                
+                // Z-HEIGHT CHECK: Skip interactions between particles at different height levels
+                // Using a threshold of 0.5 to allow for small variations
+                let z_diff = abs(p.z_height - neighbor.z_height);
+                let same_z_level = z_diff < 0.5;
 
-                // Special Case: Air -> Water Interaction (Wind hitting Waves)
-                if is_air && neighbor_is_water {
-                    // Only interact if Water density is high (Wave Crest / Surface)
-                    if neighbor.density > params.wind_interaction_threshold {
-                        // Repulsion Force (Bounce)
-                        // Force direction: away from water particle
-                        let bounce_dir = normalize(r);
-                        let penetration = neighbor.density - params.wind_interaction_threshold;
-                        let bounce_strength = 200.0; // Tunable
-                        
-                        // Add explicit bounce force (modifying pressure_force accumulator)
-                        pressure_force += bounce_strength * penetration * bounce_dir * (1.0 - r_len / h);
-                    }
-                    // Do NOT apply standard SPH forces
+                if !same_z_level {
+                    // Different Z levels - no interaction at all!
                     continue;
                 }
 
-                // Special Case: Water -> Air (Ignore for now, Air doesn't push Water much)
-                if is_water && neighbor_is_air {
-                    continue;
-                }
+                // From here on, we know particles are at the same z level
+                // z=0: Water ↔ Hull
+                // z=1: Mast (isolated - no SPH peers, bonds only)
+                // z=2: Air ↔ Sail
 
-                // Standard SPH Checks (Same as Density Kernel)
-                if !same_layer && !is_hull && !neighbor_is_hull {
+                // Standard SPH: Only apply forces between same-type particles
+                // OR between fluid and solid at same z (water↔hull, air↔sail)
+                let is_fluid = is_water || is_air;
+                let is_solid = is_hull || is_sail;
+                let neighbor_is_fluid = neighbor_is_water || neighbor_is_air;
+                let neighbor_is_solid = neighbor_is_hull || neighbor_is_sail;
+                
+                // Skip if different fluid types (shouldn't happen at same z anyway)
+                if !same_layer && is_fluid && neighbor_is_fluid {
                     continue;
                 }
                 
-                // ==================== SOFT-SPHERE HULL-FLUID REPULSION ====================
-                if !same_layer && (is_hull || neighbor_is_hull) {
-                    let fluid_is_air = (is_hull && neighbor_is_air) || (is_air && neighbor_is_hull);
-
-                    let strength = select(LJ_STRENGTH_WATER, LJ_STRENGTH_AIR, fluid_is_air);
-                    let radius = select(LJ_RADIUS_WATER, LJ_RADIUS_AIR, fluid_is_air);
+                // ==================== SOFT-SPHERE SOLID-FLUID REPULSION ====================
+                // Prevents fluid from penetrating solids at the same z level
+                if is_fluid != neighbor_is_fluid {
+                    // At z=0: Water↔Hull repulsion (strong barrier)
+                    // At z=2: Air↔Sail repulsion (gentle - sail catches wind)
+                    let is_air_layer = is_air || neighbor_is_air;
+                    
+                    // Air-sail uses MUCH softer settings (sail is light, catches wind gently)
+                    let strength = select(LJ_STRENGTH_WATER, 5000.0, is_air_layer);
+                    let radius = select(LJ_RADIUS_WATER, 10.0, is_air_layer);
 
                     if r_len < radius {
                         let t = 1.0 - (r_len / radius);
-                        var force: f32;
-
-                        if fluid_is_air {
-                            // Linear Ramp for Air (Stiff barrier)
-                            force = strength * t;
-                        } else {
-                            // Quadratic Ramp for Water (Soft settling)
-                            force = strength * t * t;
-                        }
+                        // Quadratic ramp for smooth repulsion
+                        let force = strength * t * t;
                         pressure_force += force * normalize(r);
                     }
                 }
-                // =============================================================================
                 // =============================================================================
 
                 // Pressure force (symmetric formulation) - repulsion
@@ -283,6 +285,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Apply XSPH smoothing to reduce oscillation
     p.vel += XSPH_EPSILON * xsph_correction;
     
+    // ==================== SAIL AERODYNAMICS ====================
+    let is_sail = (p.layer_mask & 8u) != 0u;
+    if is_sail {
+        // Wind velocity (matching wind tunnel speed)
+        let wind_vel = vec2<f32>(150.0, 0.0);
+        
+        // Force from relative wind (sail catches wind)
+        let rel_wind = wind_vel - p.vel;
+        let wind_force = 0.15 * rel_wind;  // Sail absorbs some wind momentum
+        p.vel += wind_force * params.delta_time;
+        
+        // Quadratic drag (air resistance on the sail)
+        let drag_coeff = 0.3;
+        let vel_mag = length(p.vel);
+        if vel_mag > 0.1 {
+            let drag_force = -drag_coeff * vel_mag * p.vel;
+            p.vel += drag_force * params.delta_time;
+        }
+    }
+    // ==========================================================
     
     // Apply damping to prevent energy buildup
     p.vel *= VELOCITY_DAMPING;
