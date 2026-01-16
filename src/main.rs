@@ -2,13 +2,9 @@
 //!
 //! A 2.5D top-down sailing simulation using GPU-accelerated SPH physics.
 
-mod render;
-mod resources;
-mod simulation;
-
 use bevy::prelude::*;
-use render::ParticleRenderPlugin;
-use simulation::SimulationPlugin;
+use sailing::render::ParticleRenderPlugin;
+use sailing::simulation::SimulationPlugin;
 
 fn main() {
     App::new()

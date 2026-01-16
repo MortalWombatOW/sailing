@@ -210,6 +210,7 @@ pub fn scenario_hurricane(particle_count: usize) -> (Vec<Particle>, HullBounds) 
             let py = mast_y + (dy as f32) * 4.0;
             let mut p = Particle::new_mast([px, py], [0.0, 0.0]);
             p.z_height = MAST_Z;
+            p.mass = 100000.0; // Static - physics shader treats mass > 10000 as immovable
             particles.push(p);
         }
     }
@@ -229,6 +230,7 @@ pub fn scenario_hurricane(particle_count: usize) -> (Vec<Particle>, HullBounds) 
             let py = spar_start_y + (y as f32) * SAIL_SPACING;
             let mut p = Particle::new_mast([px, py], [0.0, 0.0]); // Same as mast (heavy wood)
             p.z_height = MAST_Z; // Spar at mast level (z=1) - doesn't interact with air
+            p.mass = 100000.0; // Static - physics shader treats mass > 10000 as immovable
             particles.push(p);
         }
     }

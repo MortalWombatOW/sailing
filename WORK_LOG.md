@@ -1,5 +1,46 @@
 # Work Log
 
+## 2026-01-16: Physics Stability & Collision Constraints
+
+### Summary
+Addressed simulate instability ("particles shooting off") by implementing PBD collision constraints, clamping maximum forces, and reducing the simulation timestep.
+
+### Stability Fixes
+
+#### 1. Position-Based Collision Constraints (PBD)
+- **Problem**: In high-speed wind simulation, standard force-based soft repulsion wasn't strong enough. Particles would penetrate too deeply in a single frame, resulting in massive repulsion forces that ejected them at infinite speed.
+- **Solution**: Implemented a **Position-Based Dynamics (PBD)** pass that runs *before* force calculation.
+- **Logic**: 
+    - Iterates over neighbor pairs.
+    - If `dist < 0.5 * h`, directly separates them by modifying position.
+    - Runs 3 iterations per frame to resolve clusters.
+    - "Hard" constraint prevents deep penetration, keeping subsequent force calculations within safe limits.
+- **Pipeline Stage**: Inserted as Stage 5.5, after Sorting and before Density/Force calculation.
+
+#### 2. Force Clamping & Timestep
+- **Force limits**: Increased `bonds.wgsl` force clamps from 50k/100k to **2,000,000 (2M)** to match the scale of repulsion forces. Previously, bonds were "giving up" against the wind because they were clamped.
+- **Acceleration Cap**: Added a safety clamp in `forces.wgsl` limiting acceleration to `50,000` units/s². This prevents single-frame explosions if a particle *does* get trapped.
+- **Timestep**: Reduced `delta_time` from `0.04` (25fps) to `0.02` (50fps) to improve integration stability.
+
+### Files Changed
+- `assets/shaders/constraints.wgsl` - NEW: PBD solver shader
+- `src/simulation/systems.rs` - Registered constraints pipeline, added to render graph (Stage 5.5)
+- `assets/shaders/bonds.wgsl` - Increased force clamps to 2M
+- `assets/shaders/forces.wgsl` - Added acceleration max-clamp
+- `src/resources.rs` - Reduced delta_time to 0.02
+- `src/simulation/setup.rs` - Increased SAIL_STIFFNESS multiplier to 4x
+
+---
+
+## 2026-01-15: Strengthening Sail-Spar Connections
+
+### Summary
+Doubled the stiffness of Sail-Spar bonds (2x -> 4x) to prevent separation under high wind loads.
+
+### Changes
+- `src/simulation/setup.rs`: Increased bond stiffness multiplier for sail-spar connections from 2.0 to 4.0.
+
+
 ## 2026-01-13: Phase 4 Continued - Energy Conservation & Bond Strengthening
 
 ### Summary

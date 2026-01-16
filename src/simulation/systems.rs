@@ -21,7 +21,7 @@ use bevy::{
 
 use super::setup::{
     BondBuffer, CellCountsBuffer, CellOffsetsBuffer, ForceBuffer, GridParamsBuffer, IndexBuffer,
-    ParticleBuffer, SimParamsBuffer, BOND_COUNT, PARTICLE_COUNT,
+    InteractionTableBuffer, ParticleBuffer, SimParamsBuffer, BOND_COUNT, PARTICLE_COUNT,
 };
 use crate::resources::GridParams;
 
@@ -38,13 +38,15 @@ pub struct SphPipelines {
     pub density: CachedComputePipelineId,
     pub forces: CachedComputePipelineId,
     pub bonds: CachedComputePipelineId,
+    pub constraints: CachedComputePipelineId, // New PBD constraints
     pub physics: CachedComputePipelineId,
     // Bind group layouts
     pub cell_id_layout: BindGroupLayout,
     pub count_layout: BindGroupLayout,
     pub prefix_layout: BindGroupLayout,
     pub scatter_layout: BindGroupLayout,
-    pub density_layout: BindGroupLayout,
+    pub density_layout: BindGroupLayout, // Also used for constraints
+    pub forces_layout: BindGroupLayout,  // Separate layout for forces (has InteractionTable)
     pub bonds_layout: BindGroupLayout,
     pub physics_layout: BindGroupLayout,
 }
@@ -94,15 +96,28 @@ impl FromWorld for SphPipelines {
             ],
         );
 
-        // Density/Forces layout: particles, indices, cell_offsets, grid, sim params
+        // Density layout: particles, indices, cell_offsets, grid, sim params
         let density_layout = render_device.create_bind_group_layout(
-            Some("Density/Forces Layout"),
+            Some("Density Layout"),
             &[
                 storage_buffer_entry(0, false), // particles rw
                 storage_buffer_entry(1, true),  // indices read
                 storage_buffer_entry(2, true),  // cell_offsets read
                 uniform_buffer_entry(3),        // grid params
                 uniform_buffer_entry(4),        // sim params
+            ],
+        );
+
+        // Forces layout: same as density + InteractionTable at binding 5
+        let forces_layout = render_device.create_bind_group_layout(
+            Some("Forces Layout"),
+            &[
+                storage_buffer_entry(0, false), // particles rw
+                storage_buffer_entry(1, true),  // indices read
+                storage_buffer_entry(2, true),  // cell_offsets read
+                uniform_buffer_entry(3),        // grid params
+                uniform_buffer_entry(4),        // sim params
+                uniform_buffer_entry(5),        // interaction table
             ],
         );
 
@@ -134,6 +149,7 @@ impl FromWorld for SphPipelines {
         let density_shader = asset_server.load("shaders/density.wgsl");
         let forces_shader = asset_server.load("shaders/forces.wgsl");
         let bonds_shader = asset_server.load("shaders/bonds.wgsl");
+        let constraints_shader = asset_server.load("shaders/constraints.wgsl");
         let physics_shader = asset_server.load("shaders/physics.wgsl");
 
         // Create pipelines
@@ -199,7 +215,7 @@ impl FromWorld for SphPipelines {
 
         let forces = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("Forces Pipeline".into()),
-            layout: vec![density_layout.clone()],
+            layout: vec![forces_layout.clone()],
             shader: forces_shader,
             shader_defs: vec![],
             entry_point: "main".into(),
@@ -211,6 +227,16 @@ impl FromWorld for SphPipelines {
             label: Some("Bonds Pipeline".into()),
             layout: vec![bonds_layout.clone()],
             shader: bonds_shader,
+            shader_defs: vec![],
+            entry_point: "main".into(),
+            push_constant_ranges: vec![],
+            zero_initialize_workgroup_memory: true,
+        });
+
+        let constraints = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("Constraints Pipeline".into()),
+            layout: vec![density_layout.clone()], // Sharing density layout (same bindings)
+            shader: constraints_shader,
             shader_defs: vec![],
             entry_point: "main".into(),
             push_constant_ranges: vec![],
@@ -236,12 +262,14 @@ impl FromWorld for SphPipelines {
             density,
             forces,
             bonds,
+            constraints,
             physics,
             cell_id_layout,
             count_layout,
             prefix_layout,
             scatter_layout,
             density_layout,
+            forces_layout,
             bonds_layout,
             physics_layout,
         }
@@ -284,7 +312,9 @@ pub struct SphBindGroups {
     pub prefix: BindGroup,
     pub scatter: BindGroup,
     pub density: BindGroup,
+    pub forces: BindGroup,  // Separate bind group with InteractionTable
     pub bonds: BindGroup,
+    pub constraints: BindGroup, // Re-uses density bind group structure but unique group
     pub physics: BindGroup,
 }
 
@@ -301,10 +331,13 @@ fn prepare_bind_groups(
     sim_params: Option<Res<SimParamsBuffer>>,
     bond_buffer: Option<Res<BondBuffer>>,
     force_buffer: Option<Res<ForceBuffer>>,
+    interaction_table: Option<Res<InteractionTableBuffer>>,
 ) {
     let (Some(pipelines), Some(particles), Some(indices), Some(cell_counts), 
-         Some(cell_offsets), Some(grid_params), Some(sim_params), Some(bond_buffer), Some(force_buffer)) = 
-        (pipelines, particles, indices, cell_counts, cell_offsets, grid_params, sim_params, bond_buffer, force_buffer) 
+         Some(cell_offsets), Some(grid_params), Some(sim_params), Some(bond_buffer), 
+         Some(force_buffer), Some(interaction_table)) = 
+        (pipelines, particles, indices, cell_counts, cell_offsets, grid_params, 
+         sim_params, bond_buffer, force_buffer, interaction_table) 
     else {
         return;
     };
@@ -385,7 +418,7 @@ fn prepare_bind_groups(
         ],
     );
 
-    // Density/Forces bind group
+    // Density bind group
     let density = render_device.create_bind_group(
         Some("Density BindGroup"),
         &pipelines.density_layout,
@@ -413,6 +446,38 @@ fn prepare_bind_groups(
         ],
     );
 
+    // Forces bind group (includes InteractionTable at binding 5)
+    let forces = render_device.create_bind_group(
+        Some("Forces BindGroup"),
+        &pipelines.forces_layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particles.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: indices.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: cell_offsets.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: grid_params.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: sim_params.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: interaction_table.0.as_entire_binding(),
+            },
+        ],
+    );
+
     // Bonds bind group
     let bonds = render_device.create_bind_group(
         Some("Bonds BindGroup"),
@@ -433,7 +498,33 @@ fn prepare_bind_groups(
         ],
     );
 
-    // Physics bind group
+    // Constraints bind group
+    let constraints = render_device.create_bind_group(
+        Some("Constraints BindGroup"),
+        &pipelines.density_layout,
+        &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particles.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: indices.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: cell_offsets.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: grid_params.0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: sim_params.0.as_entire_binding(),
+            },
+        ],
+    );
     let physics = render_device.create_bind_group(
         Some("Physics BindGroup"),
         &pipelines.physics_layout,
@@ -459,7 +550,9 @@ fn prepare_bind_groups(
         prefix,
         scatter,
         density,
+        forces,
         bonds,
+        constraints,
         physics,
     });
 }
@@ -517,6 +610,9 @@ impl render_graph::Node for SphPhysicsNode {
             return Ok(());
         };
         let Some(bonds_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.bonds) else {
+            return Ok(());
+        };
+        let Some(constraints_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.constraints) else {
             return Ok(());
         };
         let Some(physics_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.physics) else {
@@ -608,6 +704,21 @@ impl render_graph::Node for SphPhysicsNode {
             pass.dispatch_workgroups(1, 1, 1);
         }
 
+        // Stage 5.5: Position Constraints (PBD)
+        // Corrects particle positions to prevent overlaps BEFORE density/force calc
+        // Run multiple iterations for stability
+        for _ in 0..3 {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
+                    label: Some("Constraints Pass"),
+                    timestamp_writes: None,
+                },
+            );
+            pass.set_pipeline(constraints_pipeline);
+            pass.set_bind_group(0, &bind_groups.constraints, &[]);
+            pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
+        }
+
         // Stage 6: Density calculation
         {
             let mut pass = render_context.command_encoder().begin_compute_pass(
@@ -630,7 +741,7 @@ impl render_graph::Node for SphPhysicsNode {
                 },
             );
             pass.set_pipeline(forces_pipeline);
-            pass.set_bind_group(0, &bind_groups.density, &[]);
+            pass.set_bind_group(0, &bind_groups.forces, &[]);
             pass.dispatch_workgroups(particle_workgroup_count, 1, 1);
         }
 
@@ -680,6 +791,7 @@ pub fn prepare_bind_group(
     sim_params: Option<Res<SimParamsBuffer>>,
     bond_buffer: Option<Res<BondBuffer>>,
     force_buffer: Option<Res<ForceBuffer>>,
+    interaction_table: Option<Res<InteractionTableBuffer>>,
 ) {
     prepare_bind_groups(
         commands,
@@ -693,6 +805,7 @@ pub fn prepare_bind_group(
         sim_params,
         bond_buffer,
         force_buffer,
+        interaction_table,
     );
 }
 

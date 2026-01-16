@@ -10,6 +10,7 @@ use bevy::{
 
 use crate::resources::{Bond, GridParams, SimParams};
 use super::scenarios;
+use super::physics_config::{default_interaction_table, InteractionTable};
 
 // ==================== SIMULATION CONFIG ====================
 /// Number of particles in the simulation
@@ -570,7 +571,7 @@ impl FromWorld for BondBuffer {
                 particle_a: spar_right_idx as u32,
                 particle_b: sail_left_idx as u32,
                 rest_length: hurricane_config::SAIL_SPACING,
-                stiffness: SAIL_STIFFNESS * 2.0,
+                stiffness: SAIL_STIFFNESS * 4.0, // Doubled from 2.0 -> 4.0
                 breaking_strain: BOND_BREAKING_STRAIN,
                 bond_type: 1,
                 is_active: 1,
@@ -622,6 +623,30 @@ impl FromWorld for ForceBuffer {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        
+        Self(buffer)
+    }
+}
+
+/// Resource holding the interaction table uniform buffer.
+/// Contains per-material-pair repulsion parameters for the GPU.
+#[derive(Resource)]
+pub struct InteractionTableBuffer(pub Buffer);
+
+impl FromWorld for InteractionTableBuffer {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+        
+        let interaction_table = default_interaction_table();
+        
+        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("InteractionTable Buffer"),
+            contents: bytemuck::bytes_of(&interaction_table),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+        
+        println!("InteractionTable buffer created: {} bytes", 
+            std::mem::size_of::<InteractionTable>());
         
         Self(buffer)
     }

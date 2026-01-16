@@ -64,11 +64,43 @@ struct SimParams {
     _padding: vec4<f32>,
 }
 
+// Per-material-pair interaction profile (matches Rust InteractionProfile)
+struct InteractionProfile {
+    repulsion_strength: f32,
+    repulsion_radius: f32,
+    repulsion_ramp: u32,  // 0=Linear, 1=Quadratic
+    _padding: u32,
+}
+
+// Full interaction table (matches Rust InteractionTable)
+// profiles: 5x5 matrix indexed by [type_a * 5 + type_b]
+// Types: Water=0, Air=1, Hull=2, Sail=3, Mast=4
+struct InteractionTable {
+    profiles: array<InteractionProfile, 25>,
+    sph_viscosity: f32,
+    sph_pressure_stiffness: f32,
+    sph_close_repulsion: f32,
+    xsph_epsilon: f32,
+    velocity_damping: f32,
+    pressure_cap: f32,
+    _padding: vec2<f32>,
+}
+
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
 @group(0) @binding(2) var<storage, read> cell_offsets: array<u32>;  // From counting sort: offset[i] = start of cell i
 @group(0) @binding(3) var<uniform> grid: GridParams;
 @group(0) @binding(4) var<uniform> params: SimParams;
+@group(0) @binding(5) var<uniform> interactions: InteractionTable;
+
+// Get material type index from layer_mask (for interaction table lookup)
+fn get_type_index(layer_mask: u32) -> u32 {
+    if (layer_mask & 1u) != 0u { return 0u; }  // Water
+    if (layer_mask & 2u) != 0u { return 1u; }  // Air
+    if (layer_mask & 4u) != 0u { return 2u; }  // Hull
+    if (layer_mask & 8u) != 0u { return 3u; }  // Sail
+    return 4u;                                   // Mast
+}
 
 // Tait's Equation of State for pressure
 fn compute_pressure(density: f32, target_density: f32) -> f32 {
@@ -137,8 +169,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let is_water = (p.layer_mask & 1u) != 0u;
     let target_density = select(params.target_density_air, params.target_density_water, is_water);
     
-    // Compute pressure from Tait EOS with caps
-    p.pressure = clamp(compute_pressure(p.density, target_density), 0.0, PRESSURE_CAP);
+    // Compute pressure from Tait EOS with caps (inlined to use interaction table)
+    let pressure_ratio = p.density / target_density;
+    let raw_pressure = interactions.sph_pressure_stiffness * (pow(pressure_ratio, PRESSURE_GAMMA) - 1.0);
+    p.pressure = clamp(raw_pressure, 0.0, interactions.pressure_cap);
     
     // Use stored cell_id to derive cell coordinates (avoids floating point precision mismatches)
     let cell_x = i32(p.cell_id % grid.grid_width);
@@ -235,19 +269,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 
                 // ==================== SOFT-SPHERE SOLID-FLUID REPULSION ====================
                 // Prevents fluid from penetrating solids at the same z level
+                // Uses per-material-pair profiles from InteractionTable
                 if is_fluid != neighbor_is_fluid {
-                    // At z=0: Water↔Hull repulsion (strong barrier)
-                    // At z=2: Air↔Sail repulsion (sail deflects wind)
-                    let is_air_layer = is_air || neighbor_is_air;
-                    
-                    // Air-sail repulsion - strong enough to deflect wind
-                    let strength = select(LJ_STRENGTH_WATER, 25000.0, is_air_layer);
-                    let radius = select(LJ_RADIUS_WATER, 15.0, is_air_layer);
+                    // Look up interaction profile for this material pair
+                    let my_type = get_type_index(p.layer_mask);
+                    let neighbor_type = get_type_index(neighbor.layer_mask);
+                    let profile_idx = my_type * 5u + neighbor_type;
+                    let profile = interactions.profiles[profile_idx];
 
-                    if r_len < radius {
+                    let strength = profile.repulsion_strength;
+                    let radius = profile.repulsion_radius;
+                    let use_quadratic = profile.repulsion_ramp == 1u;
+
+                    if r_len < radius && strength > 0.0 {
                         let t = 1.0 - (r_len / radius);
-                        // Quadratic ramp for smooth repulsion
-                        let force = strength * t * t;
+                        // Select ramp type: Linear (0) or Quadratic (1)
+                        let force = select(strength * t, strength * t * t, use_quadratic);
                         pressure_force += force * normalize(r);
                     }
                 }
@@ -268,12 +305,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let close_threshold = h * CLOSE_RANGE;
                 if r_len < close_threshold {
                     let close_factor = (close_threshold - r_len) / close_threshold;  // 0 at threshold, 1 at 0
-                    pressure_force += CLOSE_REPULSION * close_factor * close_factor * normalize(r);
+                    pressure_force += interactions.sph_close_repulsion * close_factor * close_factor * normalize(r);
                 }
                 
                 // Viscosity force
                 let vel_diff = neighbor.vel - p.vel;
-                viscosity_force += VISCOSITY_MU * neighbor.mass * (vel_diff / neighbor.density) * viscosity_laplacian(r_len, h);
+                viscosity_force += interactions.sph_viscosity * neighbor.mass * (vel_diff / neighbor.density) * viscosity_laplacian(r_len, h);
                 
                 // XSPH velocity smoothing - averages velocity with neighbors OF THE SAME TYPE
                 if same_layer {
@@ -285,12 +322,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
     
-    // Apply forces to velocity
+    // Apply forces to velocity with safety clamp
     let total_force = pressure_force + viscosity_force;
-    p.vel += (total_force / p.density) * params.delta_time;
+    let acceleration = total_force / p.density;
+    
+    // Clamp acceleration magnitude to prevent explosions
+    let max_accel = 50000.0; // Cap acceleration
+    let accel_len = length(acceleration);
+    if accel_len > max_accel {
+        p.vel += (acceleration / accel_len) * max_accel * params.delta_time;
+    } else {
+        p.vel += acceleration * params.delta_time;
+    }
     
     // Apply XSPH smoothing to reduce oscillation
-    p.vel += XSPH_EPSILON * xsph_correction;
+    p.vel += interactions.xsph_epsilon * xsph_correction;
     
     // ==================== SAIL AERODYNAMICS ====================
     let is_sail = (p.layer_mask & 8u) != 0u;
@@ -314,7 +360,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // ==========================================================
     
     // Apply damping to prevent energy buildup
-    p.vel *= VELOCITY_DAMPING;
+    p.vel *= interactions.velocity_damping;
 
     particles[idx] = p;
 }

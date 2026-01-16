@@ -81,7 +81,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // Spring force (limited to prevent extreme values)
     let spring_force_raw = bond.stiffness * (dist - bond.rest_length);
-    let spring_force = clamp(spring_force_raw, -100000.0, 100000.0);
+    let spring_force = clamp(spring_force_raw, -2000000.0, 2000000.0);
     
     // Damping force (proportional to relative velocity along spring)
     let damping_coeff = 200.0; // Damping coefficient (was 50)
@@ -92,7 +92,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let force_vec = force_dir * total_force;
 
     // Atomic Accumulation with clamping to prevent overflow
-    let force_clamped = clamp(force_vec, vec2<f32>(-50000.0), vec2<f32>(50000.0));
+    // Scaled by 1000, so 2M becomes 2 billion (fits in i32)
+    let force_clamped = clamp(force_vec, vec2<f32>(-2000000.0), vec2<f32>(2000000.0));
     let fx_int = i32(force_clamped.x * FORCE_SCALER);
     let fy_int = i32(force_clamped.y * FORCE_SCALER);
 

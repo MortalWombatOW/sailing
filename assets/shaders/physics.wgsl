@@ -69,13 +69,104 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // ==================== STATIC PARTICLE CHECK ====================
     // If mass is huge (Infinite mass), treat as static obstacle
-    if p.mass > 10000.0 {
+    // Exception: Sail particles (layer 8) are kinematic (moved by angle)
+    if p.mass > 10000.0 && (p.layer_mask & 8u) == 0u {
         p.vel = vec2<f32>(0.0, 0.0);
         // Do not update position
         particles[idx] = p;
+        atomicStore(&forces[idx * 2u], 0);
+        atomicStore(&forces[idx * 2u + 1u], 0);
         return;
     }
     // ===============================================================
+
+    // ==================== SAIL ROTATION (Kinematic) ====================
+    let is_sail = (p.layer_mask & 8u) != 0u;
+    if is_sail {
+        // Rotate sail particles around mast center
+        // Mast center from hurricane config: 
+        // hull center = (-80 + 20*8/2, -20 + 5*8/2) = (0.0, 0.0) -> Wait, let's clearer
+        // Hull start: -80, -20. Width 20*8=160. Height 5*8=40. Center = (0, 0).
+        // Mast at center = (0, 0).
+        let mast_center = vec2<f32>(0.0, 0.0); 
+        
+        // We need the *initial* offset to rotate it. 
+        // But p.pos is current position. If we just rotate p.pos, it will spin forever!
+        // We need to know the REST position relative to mast.
+        // Option A: Store rest pos in shader? Too hard.
+        // Option B: Back-calculate from current angle? Hard if angle changes.
+        // Option C: Use bond rest lengths? Complex.
+        // Option D: Just force it based on ID?
+        // Let's assume the sail is INITIALLY spawned at angle 0.
+        // Wait, if we move it every frame based on angle, we need a stable reference.
+        // For now, let's rely on the bonds to pull it? No, user wants DIRECT control.
+        
+        // Revised Approach: 
+        // We don't change position here. We let the BONDS move the sail.
+        // We act on the SPAR. The spar is attached to the mast.
+        // If we rotate the SPAR, the sail will follow.
+        // But wait, I made the spar STATIC (mass 100000).
+        // So I should rotate the SPAR particles here!
+        
+        // Let's rotate SPAR (layer 16 but mass > 10000) and SAIL (layer 8).
+        // Actually spar uses MAST layer (16).
+        
+        // If it's a spar particle (Mass > 10000 AND Layer == MAST AND NOT at (0,0))
+        // Identify spar by being Mast layer but not the central mast cluster?
+        // Or just rotate ALL mast particles around (0,0)? The center ones won't move much.
+        
+        // Better: Rotate based on initial relative position.
+        // But we don't have initial position.
+        // However, if we assume the spar is initially horizontal (y=0) or vertical?
+        // In scenario, spar is to the RIGHT of mast. (Offset positive X).
+        
+        // Let's try to just rotate the velocity? No, kinematic means setting position.
+        
+        // CRITICAL: Without initial position, we can't do absolute rotation.
+        // But we can rotate the VELOCITY to push it towards target angle? No.
+        
+        // Alternative: Rotate the BOND offsets?
+        // Bonds have rest_length (scalar). They don't have orientation.
+        
+        // Okay, we MUST store initial position or have a way to derive it.
+        // Or... we change the "Static" check to allow Spar to move IF it is driven by this rotation.
+        
+        // Let's assume we simply want to set the position of Spar particles.
+        // We can infer their "radius" from the mast center (length(p.pos - center)).
+        // And their "initial angle" was 0 (pointing East).
+        // So new pos = center + radius * (cos(a), sin(a)).
+        
+        // Check scenario: Spar starts at mast_x + spacing. Extends RIGHT.
+        // So yes, initial angle is 0.
+
+        let rel_pos = p.pos - mast_center;
+        let dist = length(rel_pos);
+        
+        // Only apply to Spar (which are Mast layer, but non-zero distance) and Sail
+        // Actually, just Spar. Sail is dynamic and attached to Spar.
+        // Wait, if Sail is dynamic, wind will blow it.
+        // If Spar is kinematic, it acts as the boom.
+        
+        // Let's apply to Spar particles (mass > 10000 && layer == MAST)
+        // Check if dist > 1.0 to avoid rotating the mast itself (which is at 0,0)
+        let is_static_spar = (p.mass > 10000.0) && ((p.layer_mask & 16u) != 0u) && (dist > 2.0);
+
+        if is_static_spar {
+            let angle = params.rudder_angle; // Using this as sail/spar angle
+           
+           // Target position
+            let target_pos = mast_center + vec2<f32>(cos(angle), sin(angle)) * dist;
+           
+           // Move instantly (Kinematic)
+            p.pos = target_pos;
+            p.vel = vec2<f32>(0.0, 0.0);
+
+            particles[idx] = p;
+            atomicStore(&forces[idx * 2u], 0);
+            atomicStore(&forces[idx * 2u + 1u], 0);
+            return;
+        }
+    }
 
     // ==================== APPLY BOND FORCES ====================
     // Read accumulated bond forces from atomic buffer and apply to velocity
